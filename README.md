@@ -15,12 +15,19 @@ Built with React, TypeScript, and Vite.
 ### GitHub Pages
 
 The public planner is hosted at
-https://redmond-tech-orchestra.github.io/meydenbauer-stage/.
+https://redmondtechorchestra.org/meydenbauer-stage/.
+The GitHub Pages URL redirects to this inherited organization domain.
 The GitHub Pages workflow deploys on pushes to `main`, and can also be run
 manually in Actions. It installs the lockfile dependencies, runs lint, builds
 with the base path provided by GitHub Pages, and publishes the resulting static
 site. Repository Pages settings must use **GitHub Actions** as the build source.
 Hash routes make each view directly linkable without server rewrites.
+The planner's HTML includes `noindex, nofollow` for all views, asking search
+engines not to index the planner or follow its links. This does not affect the
+marketing site's other pages, and is not access control: the planner and its
+repository remain public. Previously indexed pages may take time to disappear.
+Do not block crawler access to the planner in `robots.txt`, since crawlers must
+be able to read the `noindex` directive.
 
 ### Other hosting options
 
