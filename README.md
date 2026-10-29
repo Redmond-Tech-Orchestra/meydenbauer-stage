@@ -43,7 +43,7 @@ contents of `dist` to a static host with HTTPS.
   to a separate static host. Keep the trailing slash on the deployment URL.
 
 The base option sets asset URLs, including the lazy-loaded 3D and stage views.
-The view navigation uses hash routes (`#/plan`, `#/stage`, and `#/venue`), so
+The view navigation uses hash routes (`#/audience`, `#/stage`, and `#/3d`), so
 direct links, refreshes, and browser Back/Forward work on GitHub Pages without
 a server routing fallback. The same top navigation is present in all three views.
 Choose the final URL and hosting configuration before deploying; no DNS or
@@ -56,8 +56,8 @@ browser, not shared between visitors.
 
 ## View navigation
 
-Use the top navigation's **Auditorium plan**, **Production stage plan**, and
-**3D venue** titles to switch views; these replace duplicate page headings.
+Use the top navigation's **Audience**, **Stage**, and **3D** titles to switch
+views; these labels stay the same on every page and screen size.
 Audience-category legends are omitted from the plan and venue to save space;
 seat colors and attendance controls are unchanged.
 The Attendance preview panel appears only on Auditorium plan. Production stage
@@ -271,12 +271,12 @@ Clearances change when users customize seating dimensions.
 
 ## Production 2D stage view
 
-Select **Production stage plan** for a stage-only crew plan. It shares the procedural layout
+Select **Stage** for a stage-only crew plan. It shares the procedural layout
 with the 3D scene and shows musician chairs and facing directions,
 instrument footprints, stage tiers, and numbered microphone bases with boom/
 capsule positions. An adjacent input patch list labels channels 1-28, including
 the stereo keyboard DIs and speaking mic. Input 3 is reserved outside Barber.
-The audience-facing **Auditorium plan** remains unchanged.
+The audience-facing **Audience** view remains unchanged.
 The top view places the audience below and stage right on the left.
 Dimension labels, the introductory orientation sentence and footer legend are omitted from
 the drawing; tier boundaries and stair-direction arrows remain visible.
@@ -383,7 +383,11 @@ outward from the conductor, with their desks moving together to leave mic space.
 The first-violin section mic remains directional. The former second-violin
 section mic is a shared violin omni, with another shared omni between violas and
 cellos. Both shared omnis (inputs 10 and 11) stand on the 4-foot platform at the
-same Z baseline and stand height. These are recording/blend channels and cautious PA trials, not a promise
+same stand height. Input 10 sits horizontally between second-violin rows 3
+and 4 at X -13.6 feet, brought downstage to Z -48.8 feet in front of the
+chairs, analogous to input 9's front-of-section placement.
+Input 11 retains its existing position.
+These are recording/blend channels and cautious PA trials, not a promise
 of equal section coverage or sufficient gain before feedback.
 Two high wind mics reach over and aim down at the midpoint between the shifted
 front and rear wind rows. Each harp retains a close condenser.
@@ -413,8 +417,10 @@ be adjusted to actual players and instruments during rehearsal.
 Four separate percussion zone mics cover the rear instruments.
 Inputs 24-27 use identical stand positions, heights and aim in every scene:
 stage-right percussion, inner-right percussion/second timpani, central timpani,
-and mallets respectively. Bases sit at Z -71 feet and X -19, -9, 2 and 18
-feet, with poles 6 feet above the deck and short 6-inch upstage booms.
+and mallets respectively. Bases sit at Z -71 feet and X -18, -6, 6 and 18
+feet, equally spaced at 12-foot intervals in the diagram, with poles 6 feet
+above the deck and short 6-inch upstage booms. Audio engineers will refine
+placement and aim on the day.
 The first three aim toward Z -75.5 feet; the mallet mic aims toward
 X 16, Z -73.5 feet. Its aim remains fixed; audition coverage of the
 aligned mallet rows during rehearsal.
@@ -534,6 +540,39 @@ apron is unrailed; the downstage front and internal tier edges remain open.
 Winds, brass, and basses each have an individual music stand; other
 strings share stands by desk. Bass stands face inward toward the conductor.
 Violas have four pairs of chairs, each with a shared stand centered on the pair.
+The trial viola and second-violin layout puts two players at the front facing
+more upstage, with a more horizontal chair pair, followed by four players
+on two desks arcing around the conductor.
+The second-row arcs meet near center stage, leaving a narrow gap around the
+DJI/phone camera rig rather than spreading the inner desks toward the outside.
+Within each second-row arc, the outer chair is farther downstage and the
+inner chair farther upstage toward the flute row. This approximates the sweep
+from the first-violin side toward the winds while keeping desk partners on
+the same 4-foot platform, rather than crossing tier edges.
+The first two rows of both sections are shifted 9 inches upstage together,
+preserving their chair angles and spacing. The rearmost modeled chair edges
+remain about 5 inches downstage of the step to the wind platform.
+Principal mic bases 5 and 6 sit at least 9 inches upstage of the platform's
+downstage edge, keeping their modeled tripod feet on the deck. Their booms
+compensate for the base setback so capsule positions and aim stay unchanged.
+Remaining desks retain pairs in a side-facing arrangement, brought inward
+to follow the accepted front two rows. Their front chair centers align in
+depth with the outermost second-row chair ("1"). The outer single
+second violin sits on the front chair line, like the outer first violin,
+rather than the rear line. Second-violin rows 4-6 then
+sit 6 inches farther upstage to better match the first-violin alignment;
+their shared and individual stands follow. Third desks retain enough
+sideways separation to avoid modeled stand/chair overlaps. Second-violin
+rows 4, 5, and 6 sit halfway between their earlier compact positions and
+exact left-to-right alignment with standard first-violin rows 5, 6, and 7
+respectively, without changing their depths. These marks also stay fixed
+in Barber, where the first-violin layout has a separate relocation.
+The first two
+rows and keyboard positions are unchanged by this outer-desk adjustment.
+Totals remain eight violas and thirteen second
+violins (including the outer single). Shared stands and principal spot mics
+follow their desks; keyboard positions are unchanged. This layout applies
+to every piece and needs player/bow clearance confirmation in rehearsal.
 The unpaired outermost first violin and second violin players each have
 a stand directly in front of their remaining chair rather than at a desk midpoint.
 Bass stools sit 2.6 feet outward from their individual stand centers.

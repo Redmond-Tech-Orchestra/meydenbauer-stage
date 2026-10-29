@@ -16,10 +16,10 @@ const StagePlan = lazy(() => import('./StagePlan'))
 
 type Zone = 'Front' | 'Middle' | 'Rear'
 type PreviewMode = '2d' | 'stage' | '3d'
-const viewRoutes: { mode: PreviewMode; path: string; label: string; shortLabel: string }[] = [
-  { mode: '2d', path: '/plan', label: 'Auditorium plan', shortLabel: 'Auditorium' },
-  { mode: 'stage', path: '/stage', label: 'Production stage plan', shortLabel: 'Stage plan' },
-  { mode: '3d', path: '/venue', label: '3D venue', shortLabel: '3D venue' },
+const viewRoutes: { mode: PreviewMode; path: string; label: string }[] = [
+  { mode: '2d', path: '/audience', label: 'Audience' },
+  { mode: 'stage', path: '/stage', label: 'Stage' },
+  { mode: '3d', path: '/3d', label: '3D' },
 ]
 const previewModeFromUrl = (): PreviewMode =>
   viewRoutes.find((route) => `#${route.path}` === window.location.hash)?.mode ?? '2d'
@@ -454,7 +454,7 @@ function App() {
   useEffect(() => {
     const syncRoute = () => setPreviewMode(previewModeFromUrl())
     if (!viewRoutes.some((route) => `#${route.path}` === window.location.hash)) {
-      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/plan`)
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/audience`)
     }
     window.addEventListener('hashchange', syncRoute)
     return () => window.removeEventListener('hashchange', syncRoute)
@@ -1071,7 +1071,6 @@ function App() {
                 )}
               </svg>
               <span className="view-nav-label">{route.label}</span>
-              <span className="view-nav-short-label">{route.shortLabel}</span>
             </a>
           ))}
         </div>

@@ -378,7 +378,6 @@
   text-decoration: none;
 }
 .preview-mode-toggle svg { width: 16px; height: 16px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
-.view-nav-short-label { display: none; }
 .preview-mode-toggle a:hover { color: #263c33; background: #fff; }
 .preview-mode-toggle a:focus-visible { outline: 2px solid #9a752c; outline-offset: -3px; }
 .preview-mode-toggle a.is-selected {
@@ -1521,8 +1520,6 @@
 }
 
 @media (max-width: 1000px) {
-  .view-nav-label { display: none; }
-  .view-nav-short-label { display: inline; }
   .venue-3d-controls { gap: 10px; }
   .venue-3d-controls label { font-size: 11px; }
   .venue-3d-controls select { max-width: 170px; }
@@ -1669,10 +1666,6 @@
   .view-nav-venue-controls .venue-3d-controls select { width: auto; max-width: 190px; font-size: 11px; }
   .view-nav-venue-controls .house-light-control input { width: 70px; }
   .view-nav-venue-controls .venue-3d-controls button { width: auto; font-size: 11px; }
-}
-@media (min-width: 1251px) and (max-width: 1540px) {
-  .has-venue-controls .view-nav-label { display: none; }
-  .has-venue-controls .view-nav-short-label { display: inline; }
 }
 @media (max-width: 620px) {
   .view-nav-stage-controls { grid-column: 1 / -1; grid-row: 2; width: 100%; justify-content: flex-end; gap: 8px; }

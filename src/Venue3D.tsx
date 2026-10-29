@@ -1139,63 +1139,23 @@ const createStage = (scene: StageScene = 'barber') => {
   )
   conductorStand.name = 'Conductor music stand'
 
-  const addSideFacingStringPair = (
-    section: string,
-    color: number,
-    pairX: number,
-    stageHeight: number,
-    chairZs: [number, number],
-    forwardX: 1 | -1,
-    omitRearChair = false,
-  ) => {
-    const pairZ = (chairZs[0] + chairZs[1]) / 2
-    const targetYaw = Math.atan2(
-      -(conductorPosition.x - pairX),
-      -(conductorPosition.z - pairZ),
-    )
-    const straightYaw = forwardX === 1 ? -Math.PI / 2 : Math.PI / 2
-    const yawDelta = Math.atan2(
-      Math.sin(targetYaw - straightYaw),
-      Math.cos(targetYaw - straightYaw),
-    )
-    const yaw = straightYaw + THREE.MathUtils.clamp(
-      yawDelta,
-      -THREE.MathUtils.degToRad(30),
-      THREE.MathUtils.degToRad(30),
-    )
-
-    const frontZ = Math.max(...chairZs)
-    const rotation = yaw - straightYaw
-    const chairPositions = chairZs.map((z) => {
-      const offsetZ = z - frontZ
-      return {
-        x: pairX + Math.sin(rotation) * offsetZ,
-        z: frontZ + Math.cos(rotation) * offsetZ,
-      }
-    })
-    chairPositions.forEach(({ x, z }, index) => {
-      if (omitRearChair && chairZs[index] < frontZ) return
-      addChair(section, color, x, stageHeight, z, false, yaw)
-    })
-    const standPosition = omitRearChair
-      ? chairPositions[chairZs.indexOf(frontZ)]
-      : {
-          x: (chairPositions[0].x + chairPositions[1].x) / 2,
-          z: (chairPositions[0].z + chairPositions[1].z) / 2,
-        }
-    const stand = addMusicStand(
-      section,
-      standPosition.x,
-      stageHeight,
-      standPosition.z,
-      yaw,
-      1.35,
-    )
-    if (omitRearChair) stand.name = `${section} individual music stand`
-    return { chairPositions, yaw }
-  }
-
   const firstViolinXs = [-20.5, -17.5, -14.5, -11.5, -8.5, -5.5, -2.5]
+  const addArcedStringDesk = (
+    section: string, color: number, x: number, z: number, single = false,
+    principal = false, facingYaw?: number, setback = 0,
+  ) => {
+    const yaw = facingYaw ?? Math.atan2(x - conductorPosition.x, z - conductorPosition.z)
+    const sideways = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw))
+    const deskZ = z - setback
+    const center = new THREE.Vector3(x, 4, deskZ)
+    ;(single ? [0] : [-1.4, 1.4]).forEach((offset) => {
+      const position = center.clone().addScaledVector(sideways, offset)
+      addChair(section, color, position.x, 4, position.z, false, yaw)
+    })
+    const stand = addMusicStand(section, x, 4, deskZ, yaw, single ? 1.6 : 1.35)
+    stand.userData.principalDesk = principal
+    if (single) stand.name = `${section} individual music stand`
+  }
   const frontStringsSetback = 0.75
   const firstViolinDesks = firstViolinXs
     .filter((_, index) => scene !== 'barber' || index !== firstViolinXs.length - 1)
@@ -1233,16 +1193,15 @@ const createStage = (scene: StageScene = 'barber') => {
     if (single) stand.name = 'First violins individual music stand'
     stand.userData.principalDesk = principal
   })
-  ;[6.65, 9.65, 12.65, 15.65].forEach((x, index) => {
-    const zBias = -x * 0.025
-    const { yaw } = addSideFacingStringPair(
-      'Violas',
-      0x71805f,
-      x - 3.35 + index * 0.25,
-      4,
-      [-49.6 + zBias, -52.4 + zBias],
-      -1,
-    )
+  const secondRowOuterDeskZ = -50.7
+  const innerStringRowsSetback = 0.75
+  const outerStringFrontZ = secondRowOuterDeskZ - innerStringRowsSetback
+    + 1.4 * Math.sin(Math.atan2(7.4, conductorPosition.z - secondRowOuterDeskZ))
+  const thirdStringDeskZ = outerStringFrontZ - 1.4 * Math.sin(Math.PI / 3)
+  ;[[3.4, -50], [2.55, -53.6], [7.4, secondRowOuterDeskZ], [11.2, thirdStringDeskZ]].forEach(([deskX, deskZ], index) => {
+    addArcedStringDesk('Violas', 0x71805f, deskX, deskZ, false, index === 0,
+      index === 3 ? 2 * Math.PI / 3 : undefined, index < 3 ? innerStringRowsSetback : 0)
+    const yaw = 2 * Math.PI / 3
     if (index === 3) {
       const keyboardYaw = yaw + Math.PI
       const fullKeyboardWidth = 1298 / 304.8
@@ -1271,17 +1230,12 @@ const createStage = (scene: StageScene = 'barber') => {
     }
   })
 
-  ;[-20.5, -17.5, -14.5, -11.5, -8.5, -5.5, -2.5].forEach((x) => {
-    const zBias = -Math.abs(x) * 0.025
-    addSideFacingStringPair(
-      'Second violins',
-      0xb3814f,
-      x - 0.8,
-      4,
-      [-49.4 + zBias, -52.2 + zBias],
-      1,
-      x === firstViolinXs[0],
-    )
+  ;[[3.4, -50], [2.55, -53.6], [7.4, secondRowOuterDeskZ], [11.2, thirdStringDeskZ],
+    [15.275, outerStringFrontZ - 1.4], [18.275, outerStringFrontZ - 1.4],
+    [21.125, outerStringFrontZ]].forEach(([x, z], index) => {
+    addArcedStringDesk('Second violins', 0xb3814f, -x, z, index === 6, index === 0,
+      index >= 4 ? -Math.PI / 2 : index === 3 ? -2 * Math.PI / 3 : undefined,
+      index < 3 ? innerStringRowsSetback : index >= 4 ? 0.5 : 0)
   })
   const celloXs = [4.5, 8, 11.5, 15]
   celloXs.forEach((sourceX) => {
@@ -1742,12 +1696,18 @@ const createStage = (scene: StageScene = 'barber') => {
     const forward = new THREE.Vector3(-Math.sin(facingYaw), 0, -Math.cos(facingYaw))
     const isCello = section === 'Cellos'
     const base = firstDeskStand.position.clone().addScaledVector(forward, 0.7)
+    const boom = isCello ? new THREE.Vector3() : forward.clone().multiplyScalar(-0.7).setY(0.225)
+    if (section === 'Second violins' || section === 'Violas') {
+      const originalBaseZ = base.z
+      base.z = Math.min(base.z, -48.75)
+      boom.z += originalBaseZ - base.z
+    }
     const instrumentHeight = section === 'Cellos' ? 1.7 : section === 'Basses' ? 2.7 : 2.3
     const instrumentTarget = firstDeskStand.position.clone()
       .addScaledVector(forward, -0.65).add(new THREE.Vector3(0, instrumentHeight, 0))
     addMicrophone(
       `Input ${index + 4}: ${label}`, base, isCello ? 2 : 3.6,
-      isCello ? new THREE.Vector3() : forward.clone().multiplyScalar(-0.7).setY(0.225),
+      boom,
       instrumentTarget, true,
     )
   })
@@ -1763,8 +1723,8 @@ const createStage = (scene: StageScene = 'barber') => {
   )
   const violinBlend = addMicrophone(
     'Input 10: Violin 2 section',
-    new THREE.Vector3(-11.3, 4, -48.8), 5.5,
-    new THREE.Vector3(0, 0, -0.8), new THREE.Vector3(-11.3, 5.8, -51),
+    new THREE.Vector3(-13.6, 4, -48.8), 5.5,
+    new THREE.Vector3(0, 0, -0.8), new THREE.Vector3(-13.6, 5.8, -53),
   )
   violinBlend.userData.polarPattern = 'omnidirectional'
   const lowStringBlend = addMicrophone(
@@ -1844,9 +1804,9 @@ const createStage = (scene: StageScene = 'barber') => {
     )
   })
   ;[
-    { x: -19, targetX: -18, targetZ: -75.5 },
-    { x: -9, targetX: -8, targetZ: -75.5 },
-    { x: 2, targetX: 0, targetZ: -75.5 },
+    { x: -18, targetX: -18, targetZ: -75.5 },
+    { x: -6, targetX: -8, targetZ: -75.5 },
+    { x: 6, targetX: 0, targetZ: -75.5 },
     { x: 18, targetX: 16, targetZ: -73.5 },
   ].forEach(({ x, targetX, targetZ }, index) => {
     addMicrophone(
