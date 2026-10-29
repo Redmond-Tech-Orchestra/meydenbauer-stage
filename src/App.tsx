@@ -9,7 +9,7 @@ import {
 } from 'react'
 import './App.css'
 import type { VenueSeat } from './Venue3D'
-import type { StageScene } from './StageScenes'
+import SceneSelector, { type StageScene } from './StageScenes'
 
 const Venue3D = lazy(() => import('./Venue3D'))
 const StagePlan = lazy(() => import('./StagePlan'))
@@ -1092,7 +1092,12 @@ function App() {
           </svg>
           <span>Layout controls</span>
         </button>
-        {previewMode === '3d' && <div className="view-nav-venue-controls" ref={setVenueControlsHost} />}
+        {previewMode !== '2d' && (
+          <div className="view-nav-stage-controls">
+            {previewMode === '3d' && <div className="view-nav-venue-controls" ref={setVenueControlsHost} />}
+            <SceneSelector scene={stageScene} onChange={setStageScene} />
+          </div>
+        )}
       </nav>
       <div className={`split-workspace${isControlsPanelOpen && previewMode === '2d' ? '' : ' is-controls-collapsed'}${previewMode === '2d' ? '' : ' is-planning-hidden'}`}>
         <section
@@ -1372,7 +1377,7 @@ function App() {
           </div>
           {previewMode === 'stage' && (
             <Suspense fallback={<div className="venue-3d-loading">Building production stage plan...</div>}>
-              <StagePlan scene={stageScene} onSceneChange={setStageScene} />
+              <StagePlan scene={stageScene} />
             </Suspense>
           )}
           {previewMode === '3d' && (

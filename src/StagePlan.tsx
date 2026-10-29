@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { createStagePlan } from './Venue3D'
-import SceneSelector, { type StageScene } from './StageScenes'
+import type { StageScene } from './StageScenes'
 
 const channelLabel = (name: string) => /^Inputs? ([\d-]+):/.exec(name)?.[1] ?? ''
 const shortLabel = (name: string) => name.replace(/^Inputs? [\d-]+: /, '')
@@ -19,9 +19,8 @@ const fixtureLabel = (name: string) => {
     .replace('-inch timpano', '" timp.')
 }
 
-export default function StagePlan({ scene, onSceneChange }: {
+export default function StagePlan({ scene }: {
   scene: StageScene
-  onSceneChange: (scene: StageScene) => void
 }) {
   const plan = useMemo(() => {
     try {
@@ -41,10 +40,6 @@ export default function StagePlan({ scene, onSceneChange }: {
   }, 0)
   return (
     <div className="stage-production-page">
-      <div className="stage-scene-controls">
-        <SceneSelector scene={scene} onChange={onSceneChange} />
-        <span className="stage-channel-summary">{channelCount} active inputs</span>
-      </div>
       <div className="stage-production">
       <div className="stage-production-map">
         <svg viewBox="-35 -83 73 48" role="img" aria-label="Production stage plan with musician chairs, instruments, stage stairs and numbered microphone inputs">

@@ -1118,17 +1118,6 @@
   font: inherit;
   cursor: pointer;
 }
-.stage-scene-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 42px;
-}
-.stage-scene-controls .scene-selector { padding: 0; border: 0; background: transparent; color: #526559; font-size: 12px; font-weight: 600; }
-.stage-scene-controls .scene-selector select { min-height: 36px; max-width: min(250px, 55vw); padding: 6px 28px 6px 10px; border-radius: 7px; background: #fff; font-size: 12px; }
-.stage-scene-controls select:focus-visible { outline: 2px solid #9a7831; outline-offset: 2px; }
-.stage-channel-summary { color: #617167; font-size: 11px; white-space: nowrap; }
 .house-light-control input { width: 90px; accent-color: #d2a33f; }
 .house-light-control output { min-width: 32px; text-align: right; }
 .venue-seat-view {
@@ -1541,6 +1530,7 @@
 }
 
 @media (max-width: 620px) {
+  .app-shell:not(.is-auditorium) { --view-nav-height: 116px; }
   .app-shell { --view-nav-height: 76px; }
   .view-nav { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px 10px; }
   .view-nav .preview-mode-toggle { grid-row: 1; grid-column: 1 / -1; justify-self: stretch; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -1615,7 +1605,20 @@
 .split-workspace.is-controls-collapsed.is-planning-hidden {
   grid-template-columns: minmax(0, 1fr);
 }
-.view-nav-venue-controls { grid-column: 2; justify-self: end; min-width: 0; }
+.view-nav-stage-controls {
+  grid-column: 2;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.view-nav-stage-controls > .scene-selector { white-space: nowrap; }
+.view-nav-stage-controls > .scene-selector select:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.view-nav-venue-controls { min-width: 0; }
 .view-nav-venue-controls .venue-controls-dock { position: relative; }
 .venue-controls-toggle { display: inline-flex; align-items: center; gap: 7px; }
 .venue-controls-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
@@ -1672,6 +1675,7 @@
   .has-venue-controls .view-nav-short-label { display: inline; }
 }
 @media (max-width: 620px) {
+  .view-nav-stage-controls { grid-column: 1 / -1; grid-row: 2; width: 100%; justify-content: flex-end; gap: 8px; }
   .has-venue-controls .preview-mode-toggle { grid-column: 1; }
   .view-nav-venue-controls { grid-column: 2; grid-row: 1; }
   .venue-controls-toggle { padding: 9px; }
@@ -1685,5 +1689,4 @@
   .stage-production-map { aspect-ratio: 73 / 48; }
   .stage-production-map svg { height: auto; }
   .stage-input-list ol { flex: none; overflow: visible; }
-  .stage-channel-summary { font-size: 10px; }
 }

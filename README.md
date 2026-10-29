@@ -104,7 +104,9 @@ view together; selecting another preset mid-transition starts from the current p
 The **Scene** dropdown in the production stage plan and 3D venue switches
 between **Barber** (the default layout), **Holst**, **Williams**, **Korngold**,
 **Ravel**, and **Hisaishi**. The selection is shared
-between these views. A disabled **Intermission** entry separates Korngold
+between these views, with the scene selector consistently at the right of
+the top navigation. In 3D fullscreen it remains in the fullscreen controls.
+A disabled **Intermission** entry separates Korngold
 from Ravel in the dropdown. Changing scenes updates the stage without resetting the
 3D camera or audience.
 
@@ -278,7 +280,10 @@ The audience-facing **Auditorium plan** remains unchanged.
 The top view places the audience below and stage right on the left.
 Dimension labels, the introductory orientation sentence and footer legend are omitted from
 the drawing; tier boundaries and stair-direction arrows remain visible.
-The stage drawing fills a dedicated panel below a compact scene toolbar.
+The stage drawing fills a dedicated panel directly below the navigation.
+The shared scene selector sits at the right of the navigation in stage-plan
+and 3D views. Input totals remain in the patch panel, without a separate
+input-count toolbar above the drawing.
 The input patch uses channel badges, a fixed summary header and an independently
 scrolling, keyboard-focusable list. On narrow screens the list sits below the
 drawing and the page scrolls normally, keeping the full patch accessible.
@@ -388,12 +393,15 @@ both horn rows are shifted 1 foot stage-right and each chair faces the conductor
 with individual music stands following the new orientation. The horn mic follows
 the shifted section and aims at an estimated rear-row bell area.
 Trumpet and trombone mics use straight upright stands without booms, with
-capsules approximately 4 feet above the deck, aimed toward their sections.
-Their bases retain the previous positions on the 6-foot tier, approximately
-11 inches behind its downstage edge; players and their individual music stands
-move 9 inches upstage independently of the mic bases in every scene.
-Removing the booms adds about 10 inches of separation, in addition to the
-player shift, to improve section blend. Check actual stand-foot clearance,
+capsules approximately 5 feet above the lower, 5-foot wind deck, preserving
+their previous absolute height of 10 feet above the room floor.
+Their bases sit at Z -63.2 feet, fully downstage of the step at Z -64.
+The rear winds and their stands move 6 inches downstage, reducing wind-row
+spacing to 3.1 feet. Trumpet, trombone and tuba chairs and stands also move
+6 inches downstage, to Z -67.85 feet; the shared tuba/euphonium mic follows
+those players on the 6-foot tier. Horns and percussion mics stay unchanged.
+This is a trial layout, not confirmed player or instrument clearance.
+Check actual stand-foot clearance,
 percussion access, trombone slide space, balance and feedback at sound check;
 the schematic does not establish a safe rigging or placement margin.
 The tuba chair aligns with the trumpet/trombone row. Input 23 sits between
@@ -536,9 +544,9 @@ bassoons retain their 3-foot spacing.
 Wind and brass chair centers follow straight row baselines without an automatic
 rearward offset at the outer seats. Horn chairs still turn individually toward
 the conductor; their row centers remain aligned with the rest of the front brass.
-Both wind rows and their music stands are set back 12 inches, placing the second
-row near the rear edge of the 5-foot-high tier. Brass and active percussion are
-also set back 18 inches together, preserving their internal spacing.
+The front wind row retains its 12-inch setback; the rear row now has a
+6-inch setback to make room for the lower-tier brass mic bases.
+See the microphone placement notes for the trial brass positions.
 The seating setbacks preserve microphone tripod positions; subsequent mic
 revisions change aiming and wind boom reach. Stored rear percussion stays in place.
 Both harps sit farther inward toward the winds, away from the stage-left

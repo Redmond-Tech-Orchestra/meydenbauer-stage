@@ -1311,16 +1311,17 @@ const createStage = (scene: StageScene = 'barber') => {
     Array.from({ length: count }, (_, index) => pitch / 2 + index * pitch)
 
   const windsSetback = 1
+  const rearWindsForwardShift = 0.5
   addRow('Flutes', 0x5f89a8, centerOutLeft(8, 2.5), 5, -57.7 - windsSetback, false)
   addRow('Oboes', 0xa97891, centerOutRight(4, 2.5), 5, -57.7 - windsSetback, false)
-  addRow('Clarinets', 0x65947f, centerOutLeft(6, 2.5), 5, -61.3 - windsSetback, false)
-  addRow('Bassoons', 0x9b754d, centerOutRight(4, 3), 5, -61.3 - windsSetback, false)
+  addRow('Clarinets', 0x65947f, centerOutLeft(6, 2.5), 5, -61.3 - windsSetback + rearWindsForwardShift, false)
+  addRow('Bassoons', 0x9b754d, centerOutRight(4, 3), 5, -61.3 - windsSetback + rearWindsForwardShift, false)
   addHarp(13, -60.1)
   addHarp(18.25, -60.1)
 
   const brassPercussionSetback = 1.5
   const brassRowZ = -66.1 - brassPercussionSetback
-  const trumpetTromboneSetback = 0.75
+  const trumpetTromboneSetback = 0.25
   const hornStageRightShift = 1
   addRow('Horns', 0xb58a49, [-16.25, -13.75, -11.25, -8.75].map((x) => x - hornStageRightShift), 6, -66.1 - brassPercussionSetback)
   addRow('Trumpets', 0xb9a45d, [-6.25, -3.75, -1.25, 1.25, 3.75], 6, brassRowZ - trumpetTromboneSetback, false)
@@ -1826,7 +1827,7 @@ const createStage = (scene: StageScene = 'barber') => {
       ? new THREE.Vector3(Math.min(...players.map((player) => player.position.x)) - 0.5, 6, rearRowZ - 1.4)
       : isTuba
         ? lowBrassMidpoint.clone().add(new THREE.Vector3(0, 0, 0.2))
-        : new THREE.Vector3(center.x, center.y, brassRowZ + 2.7)
+        : new THREE.Vector3(center.x, 5, -63.2)
     const boom = isHorns
       ? new THREE.Vector3(1, 0, 0.5)
       : isTuba
@@ -1839,7 +1840,7 @@ const createStage = (scene: StageScene = 'barber') => {
         .add(new THREE.Vector3(0, isTuba ? 3.2 : 2.5, 0.4))
     addMicrophone(
       `Input ${index + 20}: ${isTuba && scene === 'holst' ? 'Tuba / euphonium' : section}`,
-      base, isTuba ? 4.5 : 4, boom, target,
+      base, isTuba ? 4.5 : isHorns ? 4 : 5, boom, target,
     )
   })
   ;[
@@ -3105,7 +3106,7 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity, stageScen
             <option value="conductor">Conductor phone</option>
           </select>
         </label>
-        <SceneSelector scene={stageScene} onChange={onSceneChange} />
+        {isFullscreen && <SceneSelector scene={stageScene} onChange={onSceneChange} />}
         <label className="house-light-control">
           House lights
           <input
