@@ -9,16 +9,17 @@ import {
 } from 'react'
 import './App.css'
 import type { VenueSeat } from './Venue3D'
+import type { StageScene } from './StageScenes'
 
 const Venue3D = lazy(() => import('./Venue3D'))
 const StagePlan = lazy(() => import('./StagePlan'))
 
 type Zone = 'Front' | 'Middle' | 'Rear'
 type PreviewMode = '2d' | 'stage' | '3d'
-const viewRoutes: { mode: PreviewMode; path: string; label: string }[] = [
-  { mode: '2d', path: '/plan', label: 'Auditorium plan' },
-  { mode: 'stage', path: '/stage', label: 'Production stage plan' },
-  { mode: '3d', path: '/venue', label: '3D venue' },
+const viewRoutes: { mode: PreviewMode; path: string; label: string; shortLabel: string }[] = [
+  { mode: '2d', path: '/plan', label: 'Auditorium plan', shortLabel: 'Auditorium' },
+  { mode: 'stage', path: '/stage', label: 'Production stage plan', shortLabel: 'Stage plan' },
+  { mode: '3d', path: '/venue', label: '3D venue', shortLabel: '3D venue' },
 ]
 const previewModeFromUrl = (): PreviewMode =>
   viewRoutes.find((route) => `#${route.path}` === window.location.hash)?.mode ?? '2d'
@@ -144,7 +145,7 @@ const seatPlacementsForRow = (section: SeatingSection, row: number): SeatPlaceme
     }
   }
 
-  return isRearLeftClearanceRow(section, row) ? placements.slice(0, -1) : placements
+  return isRearLeftClearanceRow(section, row) ? placements.slice(0, -3) : placements
 }
 
 const sectionCapacity = (section: SeatingSection) =>
@@ -427,10 +428,11 @@ function App() {
   const [reserveSectionIds, setReserveSectionIds] = useState(createDefaultReserveSections)
   const [ticketSales, setTicketSales] = useState<AudienceCounts>(loadTicketSales)
   const [attendanceRates, setAttendanceRates] = useState<AudienceCounts>(defaultAttendanceRates)
-  const [audienceViewMode, setAudienceViewMode] = useState<'sales' | 'full'>('sales')
+  const [audienceViewMode, setAudienceViewMode] = useState<'sales' | 'full'>('full')
   const [audienceSeed, setAudienceSeed] = useState(1)
   const [showSectionLabels, setShowSectionLabels] = useState(false)
   const [previewMode, setPreviewMode] = useState<PreviewMode>(previewModeFromUrl)
+  const [stageScene, setStageScene] = useState<StageScene>('barber')
   const [isLargeScreen, setIsLargeScreen] = useState(
     () => window.matchMedia('(min-width: 1251px)').matches,
   )
@@ -438,6 +440,7 @@ function App() {
     useState<ControlsPanelPreferences>(loadControlsPanelPreferences)
   const [toast, setToast] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
+  const [venueControlsHost, setVenueControlsHost] = useState<HTMLDivElement | null>(null)
   const auditoriumRef = useRef<HTMLDivElement>(null)
   const toastTimer = useRef<number | null>(null)
   const isControlsPanelOpen = isLargeScreen
@@ -1046,8 +1049,8 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <nav className="view-nav" aria-label="Planner views">
+    <main className={`app-shell${previewMode === '2d' ? ' is-auditorium' : ''}`}>
+      <nav className={`view-nav${previewMode === '3d' ? ' has-venue-controls' : ''}`} aria-label="Planner views">
         <div className="preview-mode-toggle">
           {viewRoutes.map((route) => (
             <a
@@ -1056,28 +1059,41 @@ function App() {
               href={`#${route.path}`}
               className={previewMode === route.mode ? 'is-selected' : ''}
               aria-current={previewMode === route.mode ? 'page' : undefined}
+              aria-label={route.label}
             >
-              {route.label}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                {route.mode === '2d' ? (
+                  <path d="M4 4h16v4H4zM5 12h2m4 0h2m4 0h2M5 16h2m4 0h2m4 0h2M5 20h2m4 0h2m4 0h2" />
+                ) : route.mode === 'stage' ? (
+                  <path d="M4 5h16v14H4zM4 14h16M8 5v9m8-9v9M9 19v-5m6 5v-5" />
+                ) : (
+                  <path d="m12 3 9 5v9l-9 5-9-5V8zm0 10 9-5m-9 5L3 8m9 5v9" />
+                )}
+              </svg>
+              <span className="view-nav-label">{route.label}</span>
+              <span className="view-nav-short-label">{route.shortLabel}</span>
             </a>
           ))}
         </div>
+        <button
+          className={`controls-menu-button${isControlsPanelOpen ? ' is-open' : ''}`}
+          hidden={previewMode !== '2d'}
+          type="button"
+          aria-controls="section-controls"
+          aria-expanded={isControlsPanelOpen}
+          aria-label={`${isControlsPanelOpen ? 'Hide' : 'Show'} layout controls`}
+          onClick={() => setControlsPanelPreferences((current) => ({
+            ...current,
+            [isLargeScreen ? 'desktop' : 'mobile']: !isControlsPanelOpen,
+          }))}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 4h16v16H4zM10 4v16" />
+          </svg>
+          <span>Layout controls</span>
+        </button>
+        {previewMode === '3d' && <div className="view-nav-venue-controls" ref={setVenueControlsHost} />}
       </nav>
-      <button
-        className={`controls-menu-button${isControlsPanelOpen ? ' is-open' : ''}`}
-        hidden={previewMode !== '2d'}
-        type="button"
-        aria-controls="section-controls"
-        aria-expanded={isControlsPanelOpen}
-        aria-label={`${isControlsPanelOpen ? 'Hide' : 'Show'} section controls`}
-        onClick={() => setControlsPanelPreferences((current) => ({
-          ...current,
-          [isLargeScreen ? 'desktop' : 'mobile']: !isControlsPanelOpen,
-        }))}
-      >
-        <span aria-hidden="true" />
-        <span aria-hidden="true" />
-        <span aria-hidden="true" />
-      </button>
       <div className={`split-workspace${isControlsPanelOpen && previewMode === '2d' ? '' : ' is-controls-collapsed'}${previewMode === '2d' ? '' : ' is-planning-hidden'}`}>
         <section
           className="controls-panel"
@@ -1184,7 +1200,7 @@ function App() {
                         title={hasTechBoothClearance(section)
                           ? `One ${section.columns}-seat row removed for tech booth clearance`
                           : section.id === 'rear-left'
-                            ? 'One chair removed from the right side of row Z for tech booth clearance'
+                            ? 'Three chairs removed from the right side of the back row for tech booth clearance'
                             : undefined}
                       >
                         {sectionCapacity(section).toLocaleString()}
@@ -1356,7 +1372,7 @@ function App() {
           </div>
           {previewMode === 'stage' && (
             <Suspense fallback={<div className="venue-3d-loading">Building production stage plan...</div>}>
-              <StagePlan />
+              <StagePlan scene={stageScene} onSceneChange={setStageScene} />
             </Suspense>
           )}
           {previewMode === '3d' && (
@@ -1365,6 +1381,9 @@ function App() {
                 seats={venueSeats}
                 audienceTotal={audienceTotal}
                 totalCapacity={totalSeats}
+                stageScene={stageScene}
+                onSceneChange={setStageScene}
+                controlsHost={venueControlsHost}
               />
             </Suspense>
           )}

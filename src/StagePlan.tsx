@@ -1,19 +1,15 @@
-import { useState } from 'react'
+import { useMemo } from 'react'
 import { createStagePlan } from './Venue3D'
+import SceneSelector, { type StageScene } from './StageScenes'
 
 const channelLabel = (name: string) => /^Inputs? ([\d-]+):/.exec(name)?.[1] ?? ''
 const shortLabel = (name: string) => name.replace(/^Inputs? [\d-]+: /, '')
-  .replace('Principal First violins - first-desk microphone', 'Principal 1st violin')
-  .replace('Principal Second violins - first-desk microphone', 'Principal 2nd violin')
-  .replace('Principal Violas - first-desk microphone', 'Principal viola')
-  .replace('Principal Cellos - first-desk microphone', 'Principal cello')
-  .replace('Principal Basses - first-desk microphone', 'Principal bass')
 
 const fixtureLabel = (name: string) => {
   if (channelLabel(name)) return channelLabel(name)
-  if (name.startsWith('Stage-left stairs')) return 'UP TO 5 FT'
+  if (/^Stage-(left|right) stairs/.test(name)) return ''
   if (name.startsWith('Conductor')) return ''
-  if (name === 'Stage camera facing center winds') return 'Camera'
+  if (name === 'Stage camera facing center winds') return 'DJI / phone'
   return name.replace('Yamaha 7000 concert bass drum', 'Bass drum')
     .replace('Concert harp', 'Harp')
     .replace('Banchan bowl percussion table', 'Bowls')
@@ -23,41 +19,48 @@ const fixtureLabel = (name: string) => {
     .replace('-inch timpano', '" timp.')
 }
 
-export default function StagePlan() {
-  const [plan] = useState(() => {
+export default function StagePlan({ scene, onSceneChange }: {
+  scene: StageScene
+  onSceneChange: (scene: StageScene) => void
+}) {
+  const plan = useMemo(() => {
     try {
-      return { items: createStagePlan(), error: null }
+      return { items: createStagePlan(scene), error: null }
     } catch (error) {
       console.error('Could not build the production stage plan.', error)
       return { items: [], error: 'Could not build the production stage plan. Please reload to try again.' }
     }
-  })
+  }, [scene])
   if (plan.error) return <div role="alert">{plan.error}</div>
   const { items } = plan
   const inputs = items.filter((item) => channelLabel(item.name))
     .sort((a, b) => Number(channelLabel(a.name).split('-')[0]) - Number(channelLabel(b.name).split('-')[0]))
+  const channelCount = inputs.reduce((total, item) => {
+    const channels = channelLabel(item.name).split('-').map(Number)
+    return total + (channels.length === 2 ? channels[1] - channels[0] + 1 : 1)
+  }, 0)
   return (
-    <div className="stage-production">
+    <div className="stage-production-page">
+      <div className="stage-scene-controls">
+        <SceneSelector scene={scene} onChange={onSceneChange} />
+        <span className="stage-channel-summary">{channelCount} active inputs</span>
+      </div>
+      <div className="stage-production">
       <div className="stage-production-map">
-        <p>Top view · audience below · stage right on the left · dimensions in feet</p>
-        <svg viewBox="-30 -83 68 48" role="img" aria-label="Production stage plan with musician chairs, instruments, stage-left stairs and numbered microphone inputs">
+        <svg viewBox="-35 -83 73 48" role="img" aria-label="Production stage plan with musician chairs, instruments, stage stairs and numbered microphone inputs">
           <path d="M-24 -80H24V-48H27V-40H-27V-48H-24Z" fill="#eef1eb" stroke="#526559" strokeWidth=".15" />
-          {[
-            { z: -80, depth: 16, height: '6 ft' },
-            { z: -64, depth: 8, height: '5 ft' },
-            { z: -56, depth: 8, height: '4 ft' },
-            { z: -48, depth: 8, height: '2 ft 8 in' },
-          ].map((tier) => (
-            <g key={tier.z}>
-              <path d={`M-24 ${tier.z}H24`} stroke="#a6b4a9" strokeWidth=".1" />
-              <text x="-26.8" y={tier.z + tier.depth / 2} fontSize=".65" fill="#526559">{tier.height}</text>
-            </g>
+          {[-80, -64, -56, -48].map((z) => (
+            <path key={z} d={`M-24 ${z}H24`} stroke="#a6b4a9" strokeWidth=".1" />
           ))}
           {items.filter((item) => item.kind === 'fixture').map((item, index) => (
             <g key={index}>
-              <title>{item.name}</title>
+              <title>{item.name}{item.percussionActive === null ? '' : ` — ${item.percussionActive ? 'active' : 'parked / inactive'} in ${scene}`}</title>
               <rect x={item.centerX - item.width / 2} y={item.centerZ - item.depth / 2}
-                width={item.width} height={item.depth} rx=".12" fill="#d4ddd5" stroke="#607365" strokeWidth=".1" />
+                width={item.width} height={item.depth} rx=".12"
+                fill={item.percussionActive === false ? '#edf0ed' : '#d4ddd5'}
+                stroke={item.percussionActive === false ? '#a2aaa4' : '#607365'}
+                strokeDasharray={item.percussionActive === false ? '.3 .2' : undefined}
+                strokeWidth=".1" />
               {Array.from({ length: item.stairCount }, (_, step) => (
                 <line key={step}
                   x1={item.centerX - item.width / 2 + step * item.width / item.stairCount}
@@ -66,10 +69,12 @@ export default function StagePlan() {
                   stroke="#607365" strokeWidth=".1" />
               ))}
               {item.stairCount > 0 && (
-                <path d={`M${item.centerX + 3} ${item.centerZ + 1}H${item.centerX - 3}l1 -.5m-1 .5l1 .5`}
+                <path d="M2 .5H-2l.6 -.3m-.6 .3l.6 .3"
+                  transform={`translate(${item.centerX} ${item.centerZ}) scale(${item.centerX > 0 ? 1 : -1} 1)`}
                   fill="none" stroke="#233b2b" strokeWidth=".15" />
               )}
-              <text x={item.centerX} y={item.centerZ} textAnchor="middle" fontSize=".48" fill="#233b2b">
+              <text x={item.centerX} y={item.centerZ} textAnchor="middle" fontSize=".48"
+                fill={item.percussionActive === false ? '#818b84' : '#233b2b'}>
                 {fixtureLabel(item.name)}
               </text>
             </g>
@@ -99,17 +104,20 @@ export default function StagePlan() {
           ))}
           <text x="0" y="-37" textAnchor="middle" fontSize="1" fill="#526559">DOWNSTAGE / AUDIENCE</text>
         </svg>
-        <p>Colored seats: musicians · red numbers: mic stand bases · red dots/lines: capsules/booms. Music stands are hidden in this view.</p>
       </div>
       <aside className="stage-input-list" aria-label="Production input patch list">
-        <h2>Input patch · 26 channels</h2>
-        <p>22 microphones + 4 DI channels</p>
-        <ol>
+        <header className="stage-input-header">
+          <h2>Input patch <span>{channelCount}</span></h2>
+          <p>{channelCount - 4} microphones <span aria-hidden="true">/</span> 4 DI channels</p>
+        </header>
+        <ol tabIndex={0} aria-label="Input channels">
           {inputs.map((item) => (
             <li key={item.name}><strong>{channelLabel(item.name)}</strong><span>{shortLabel(item.name)}</span></li>
           ))}
         </ol>
+        {scene !== 'barber' && <p className="stage-input-reserved">Input 3 reserved for violin soloist.</p>}
       </aside>
+      </div>
     </div>
   )
 }

@@ -1,6 +1,14 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import SceneSelector, { type StageScene } from './StageScenes'
+import { applyRoomLightmapLevel, attachRoomLightmap } from './RoomLighting'
+import {
+  ceilingColumns, ceilingZones, createCeilingSpotlight, createStageSpotlight, fohBarCenters,
+  fullHouseLightIntensity, roomHeight, roomOutline, roomWallAt, stageCeilingMinimum,
+  stageOffset, stageTiers, stageWashTargets,
+} from './RoomLightingLayout'
 
 export type VenueSeatKind = 'regular' | 'wheelchair' | 'companion'
 export type VenueSeatCategory = 'premium' | 'reserved' | 'general' | 'accessible'
@@ -22,9 +30,32 @@ type Venue3DProps = {
   seats: VenueSeat[]
   audienceTotal: number
   totalCapacity: number
+  stageScene: StageScene
+  onSceneChange: (scene: StageScene) => void
+  controlsHost: HTMLDivElement | null
 }
 
-const roomHeight = 31
+// Overlapping interior boxes follow the stepped wall cutout, inset by six inches.
+const cameraRoomBounds = [
+  new THREE.Box3(new THREE.Vector3(-36.5, 0.5, -79.5), new THREE.Vector3(49.5, roomHeight - 0.5, 79.5)),
+  new THREE.Box3(new THREE.Vector3(-39.5, 0.5, -62.5), new THREE.Vector3(49.5, roomHeight - 0.5, 79.5)),
+  new THREE.Box3(new THREE.Vector3(-49.5, 0.5, -59.5), new THREE.Vector3(49.5, roomHeight - 0.5, 79.5)),
+]
+const constrainCameraPosition = (position: THREE.Vector3) => {
+  if (cameraRoomBounds.some((bounds) => bounds.containsPoint(position))) return
+  const candidate = new THREE.Vector3()
+  const nearest = new THREE.Vector3()
+  let nearestDistance = Infinity
+  for (const bounds of cameraRoomBounds) {
+    bounds.clampPoint(position, candidate)
+    const distance = candidate.distanceToSquared(position)
+    if (distance < nearestDistance) {
+      nearestDistance = distance
+      nearest.copy(candidate)
+    }
+  }
+  position.copy(nearest)
+}
 const seatPitch = 1.53
 const rowPitch = 3.25
 const sideRowAngle = THREE.MathUtils.degToRad(15)
@@ -32,6 +63,22 @@ const videoAspect = 16 / 9
 const cameraViewportFov = (focalLength: number, viewportAspect: number) => {
   const frameHeightFraction = Math.min(1, viewportAspect / videoAspect)
   return THREE.MathUtils.radToDeg(2 * Math.atan((36 / videoAspect / (2 * focalLength)) / frameHeightFraction))
+}
+
+const aimCamera = (
+  camera: THREE.PerspectiveCamera,
+  target: THREE.Vector3,
+  deltaX: number,
+  deltaY: number,
+  viewportHeight: number,
+) => {
+  const distance = camera.position.distanceTo(target)
+  const rotation = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
+  const sensitivity = Math.PI / Math.max(viewportHeight, 1)
+  rotation.y -= deltaX * sensitivity
+  rotation.x = THREE.MathUtils.clamp(rotation.x - deltaY * sensitivity, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01)
+  camera.quaternion.setFromEuler(rotation)
+  target.set(0, 0, -1).applyQuaternion(camera.quaternion).multiplyScalar(distance).add(camera.position)
 }
 
 const zoneStart: Record<VenueSeat['zone'], number> = {
@@ -65,13 +112,16 @@ const orchestraColors: Record<string, number> = {
 
 const disposeObject = (object: THREE.Object3D) => {
   object.traverse((child) => {
+    if (child instanceof THREE.SpotLight) child.dispose()
     if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
       child.geometry.dispose()
       const materials = Array.isArray(child.material) ? child.material : [child.material]
       materials.forEach((material) => {
-        if (material instanceof THREE.MeshBasicMaterial && material.map) {
+        if ((material instanceof THREE.MeshBasicMaterial
+          || material instanceof THREE.MeshStandardMaterial) && material.map) {
           material.map.dispose()
         }
+        if (material instanceof THREE.MeshStandardMaterial) material.lightMap?.dispose()
         material.dispose()
       })
     }
@@ -103,15 +153,10 @@ const createWheelchairTexture = () => {
   return texture
 }
 
-const createStage = () => {
+const createStage = (scene: StageScene = 'barber') => {
   const stage = new THREE.Group()
   stage.name = 'Tiered stage with orchestra seating'
-  const tiers = [
-    { width: 48, depth: 16, height: 6, z: -72 },
-    { width: 48, depth: 8, height: 5, z: -60 },
-    { width: 48, depth: 8, height: 4, z: -52 },
-    { width: 54, depth: 8, height: 32 / 12, z: -44 },
-  ]
+  const tiers = stageTiers
 
   tiers.forEach((tier) => {
     const geometry = new THREE.BoxGeometry(tier.width, tier.height, tier.depth)
@@ -126,20 +171,29 @@ const createStage = () => {
     stage.add(platform)
   })
 
-  const harpStairs = new THREE.Group()
-  harpStairs.name = 'Stage-left stairs to 5-foot tier (schematic)'
-  harpStairs.position.set(24, 0, -60)
-  harpStairs.userData.stairCount = 10
   const stairMaterial = new THREE.MeshStandardMaterial({ color: 0x68776a, roughness: 0.88 })
-  for (let index = 0; index < 10; index++) {
-    const height = 5 - index * 0.5
-    const step = new THREE.Mesh(new THREE.BoxGeometry(1, height, 4), stairMaterial)
-    step.position.set(index + 0.5, height / 2, 0)
-    step.castShadow = true
-    step.receiveShadow = true
-    harpStairs.add(step)
+  const stairTreadDepth = 11 / 12
+  const addStageStairs = (deckHeight: number, z: number, width = 3, edgeX = 24, side: 1 | -1 = 1) => {
+    const stairs = new THREE.Group()
+    const heightLabel = deckHeight === 32 / 12 ? '2 ft 8 in' : `${deckHeight}-foot`
+    stairs.name = `Stage-${side === 1 ? 'left' : 'right'} stairs to ${heightLabel} tier (schematic)`
+    stairs.position.set(side * edgeX, 0, z)
+    const stairCount = Math.ceil(deckHeight / 0.5)
+    stairs.userData.stairCount = stairCount
+    for (let index = 0; index < stairCount; index++) {
+      const height = deckHeight * (stairCount - index) / stairCount
+      const step = new THREE.Mesh(new THREE.BoxGeometry(stairTreadDepth, height, width), stairMaterial)
+      step.position.set(side * (index + 0.5) * stairTreadDepth, height / 2, 0)
+      step.castShadow = true
+      step.receiveShadow = true
+      stairs.add(step)
+    }
+    stage.add(stairs)
   }
-  stage.add(harpStairs)
+  addStageStairs(5, -60)
+  addStageStairs(6, -76)
+  addStageStairs(32 / 12, -44, 2, 27, 1)
+  addStageStairs(32 / 12, -44, 2, 27, -1)
 
   const railingMaterial = new THREE.MeshStandardMaterial({
     color: 0x242827,
@@ -177,20 +231,21 @@ const createStage = () => {
     })
   }
   tiers.forEach((tier) => {
+    if (tier.height === 32 / 12) return
     ;[-1, 1].forEach((side) => {
       const x = side * (tier.width / 2 - 0.12)
       if (side === 1 && tier.height === 5) {
-        addRailing(x, -64, x, -62, tier.height)
-        addRailing(x, -58, x, -56, tier.height)
+        addRailing(x, -64, x, -61.5, tier.height)
+        addRailing(x, -58.5, x, -56, tier.height)
+      } else if (side === 1 && tier.height === 6) {
+        addRailing(x, -80, x, -77.5, tier.height)
+        addRailing(x, -74.5, x, -64, tier.height)
       } else {
         addRailing(x, tier.z - tier.depth / 2, x, tier.z + tier.depth / 2, tier.height)
       }
     })
   })
   addRailing(-23.88, -79.88, 23.88, -79.88, 6)
-  ;[-1, 1].forEach((side) => {
-    addRailing(side * 23.88, -48.12, side * 26.88, -48.12, 32 / 12)
-  })
 
   const conductorPosition = new THREE.Vector3(0, 32 / 12, -44)
   const podiumMaterial = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 })
@@ -274,6 +329,49 @@ const createStage = () => {
     if (part instanceof THREE.Mesh) part.castShadow = true
   })
   stage.add(mannequin)
+
+  const soloistPosition = new THREE.Vector3(-4.25, 32 / 12, -43.3)
+  if (scene === 'barber') {
+    const soloist = mannequin.clone()
+    soloist.name = 'Violin soloist'
+    soloist.position.copy(soloistPosition)
+    soloist.rotation.y = Math.PI
+    soloist.remove(...soloist.children.slice(-2))
+    const addLimb = (start: THREE.Vector3, end: THREE.Vector3, radius: number, material: THREE.Material) => {
+      const direction = end.clone().sub(start)
+      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, direction.length(), 12), material)
+      mesh.position.copy(start).add(end).multiplyScalar(0.5)
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize())
+      soloist.add(mesh)
+    }
+    const wood = new THREE.MeshStandardMaterial({ color: 0x9b491e, roughness: 0.45 })
+    const fingerboard = new THREE.MeshStandardMaterial({ color: 0x28201b, roughness: 0.6 })
+    const violin = new THREE.Group()
+    violin.name = 'Violin in playing position'
+    ;[0, 0.48].forEach((x, index) => {
+      const bout = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), wood)
+      bout.scale.set(index === 0 ? 0.36 : 0.28, 0.09, index === 0 ? 0.27 : 0.23)
+      bout.position.x = x
+      violin.add(bout)
+    })
+    const violinNeck = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.1, 0.13), fingerboard)
+    violinNeck.position.set(1.08, 0.06, 0)
+    violin.add(violinNeck)
+    violin.position.set(-0.2, 4.65, -0.36)
+    violin.rotation.y = Math.PI + Math.atan2(
+      soloistPosition.z - conductorPosition.z,
+      conductorPosition.x - soloistPosition.x,
+    )
+    soloist.add(violin)
+    addLimb(new THREE.Vector3(-0.45, 4.45, 0), new THREE.Vector3(-0.85, 3.95, -0.3), 0.1, mannequinMaterial)
+    addLimb(new THREE.Vector3(-0.85, 3.95, -0.3), new THREE.Vector3(-1.1, 4.65, -0.2), 0.09, mannequinMaterial)
+    addLimb(new THREE.Vector3(0.45, 4.45, 0), new THREE.Vector3(0.9, 4.05, -0.35), 0.1, mannequinMaterial)
+    addLimb(new THREE.Vector3(0.9, 4.05, -0.35), new THREE.Vector3(0.35, 4.72, -0.95), 0.09, mannequinMaterial)
+    soloist.traverse((part) => {
+      if (part instanceof THREE.Mesh) part.castShadow = true
+    })
+    stage.add(soloist)
+  }
 
   const chairSeatGeometry = new THREE.BoxGeometry(1.45, 0.25, 1.4)
   const chairBackGeometry = new THREE.BoxGeometry(1.45, 1.45, 0.2)
@@ -1099,15 +1197,29 @@ const createStage = () => {
 
   const firstViolinXs = [-20.5, -17.5, -14.5, -11.5, -8.5, -5.5, -2.5]
   const frontStringsSetback = 0.75
-  firstViolinXs.forEach((x) => {
-    const chairX = x - 1 - frontStringsSetback
+  const firstViolinDesks = firstViolinXs
+    .filter((_, index) => scene !== 'barber' || index !== firstViolinXs.length - 1)
+    .map((x, index) => ({
+      x: x - 1 - frontStringsSetback,
+      zBias: -Math.abs(x) * 0.025,
+      single: index === 0 && scene !== 'barber',
+      principal: index === firstViolinXs.length - (scene === 'barber' ? 2 : 1),
+    }))
+  if (scene === 'barber') {
+    firstViolinDesks.push({
+      x: firstViolinXs[0] - 1 - frontStringsSetback - 3,
+      zBias: -Math.abs(firstViolinXs[0]) * 0.025,
+      single: true,
+      principal: false,
+    })
+  }
+  firstViolinDesks.forEach(({ x: chairX, zBias, single, principal }) => {
     const yaw = -Math.PI / 2
     ;[-43.3, -46.1].forEach((z) => {
-      if (x === firstViolinXs[0] && z === -46.1) return
-      addChair('First violins', 0x9a5b4a, chairX, 32 / 12, z - Math.abs(x) * 0.025, false, yaw)
+      if (single && z === -46.1) return
+      addChair('First violins', 0x9a5b4a, chairX, 32 / 12, z + zBias, false, yaw)
     })
-    const isSinglePlayer = x === firstViolinXs[0]
-    const standZ = (isSinglePlayer ? -43.3 : -44.7) - Math.abs(x) * 0.025
+    const standZ = (single ? -43.3 : -44.7) + zBias
     const stand = addMusicStand(
       'First violins',
       chairX,
@@ -1118,7 +1230,8 @@ const createStage = () => {
       2.55,
       0,
     )
-    if (isSinglePlayer) stand.name = 'First violins individual music stand'
+    if (single) stand.name = 'First violins individual music stand'
+    stand.userData.principalDesk = principal
   })
   ;[6.65, 9.65, 12.65, 15.65].forEach((x, index) => {
     const zBias = -x * 0.025
@@ -1129,7 +1242,6 @@ const createStage = () => {
       4,
       [-49.6 + zBias, -52.4 + zBias],
       -1,
-      index === 3,
     )
     if (index === 3) {
       const keyboardYaw = yaw + Math.PI
@@ -1147,11 +1259,11 @@ const createStage = () => {
         keyboardDirection, -(fullKeyboardWidth + keyboardGap) / 2,
       )
       addKeyboard(
-        'Inputs 11-12: Stereo piano DI (88-key keyboard)', fullKeyboardWidth, 364 / 304.8, 141 / 304.8,
+        'Inputs 12-13: Piano L/R', fullKeyboardWidth, 364 / 304.8, 141 / 304.8,
         fullKeyboardPosition.x, fullKeyboardPosition.z, 0x303b42, 4, keyboardYaw,
       )
       addKeyboard(
-        'Inputs 13-14: Stereo keyboard DI (49-key keyboard)', compactKeyboardWidth, 7.19 / 12, 3.31 / 12,
+        'Inputs 14-15: Keyboard L/R', compactKeyboardWidth, 7.19 / 12, 3.31 / 12,
         compactKeyboardPosition.x, compactKeyboardPosition.z, 0x4b444f, 4, keyboardYaw,
       )
       addStool(21, 4, -50.5)
@@ -1203,22 +1315,163 @@ const createStage = () => {
   addRow('Oboes', 0xa97891, centerOutRight(4, 2.5), 5, -57.7 - windsSetback, false)
   addRow('Clarinets', 0x65947f, centerOutLeft(6, 2.5), 5, -61.3 - windsSetback, false)
   addRow('Bassoons', 0x9b754d, centerOutRight(4, 3), 5, -61.3 - windsSetback, false)
-  addHarp(14, -60.1)
-  addHarp(19.6, -60.1)
+  addHarp(13, -60.1)
+  addHarp(18.25, -60.1)
 
   const brassPercussionSetback = 1.5
+  const brassRowZ = -66.1 - brassPercussionSetback
+  const trumpetTromboneSetback = 0.75
   const hornStageRightShift = 1
   addRow('Horns', 0xb58a49, [-16.25, -13.75, -11.25, -8.75].map((x) => x - hornStageRightShift), 6, -66.1 - brassPercussionSetback)
-  addRow('Trumpets', 0xb9a45d, [-6.25, -3.75, -1.25, 1.25, 3.75], 6, -66.1 - brassPercussionSetback, false)
-  addRow('Trombones', 0x9a6849, [6.25, 8.75, 11.25, 13.75], 6, -66.1 - brassPercussionSetback, false)
-  addRow('Tuba', 0x765940, [16.25], 6, -66.1 - brassPercussionSetback, false)
+  addRow('Trumpets', 0xb9a45d, [-6.25, -3.75, -1.25, 1.25, 3.75], 6, brassRowZ - trumpetTromboneSetback, false)
+  addRow('Trombones', 0x9a6849, [6.25, 8.75, 11.25, 13.75], 6, brassRowZ - trumpetTromboneSetback, false)
+  addRow('Tuba', 0x765940, [16.25], 6, brassRowZ - trumpetTromboneSetback, false)
   addRow('Horns', 0xb58a49, [-15, -12.5, -10].map((x) => x - hornStageRightShift), 6, -69.2 - brassPercussionSetback)
   const activePercussionStart = stage.children.length
+  const centerTimpaniQuartet = (drums: THREE.Object3D[]) => {
+    const drum29 = drums.find((drum) => drum.name === '29-inch timpano')
+    const drum26 = drums.find((drum) => drum.name === '26-inch timpano')
+    if (!drum29 || !drum26) throw new Error('Missing middle timpani for quartet centering.')
+    const gapCenter = (
+      new THREE.Box3().setFromObject(drum29).min.x
+      + new THREE.Box3().setFromObject(drum26).max.x
+    ) / 2
+    drums.forEach((drum) => { drum.position.x -= gapCenter })
+  }
+  if (scene !== 'hisaishi' && scene !== 'ravel') {
+    const rowZ = -74
+    addTubularBells(10.2, -79)
+    const malletRowZ = -73.7
+    const malletRearRowZ = malletRowZ - 2.6
+    addBarPercussion('Glockenspiel', 3.2, 1.5, 21.9, malletRowZ, false, 0)
+    addBarPercussion('Xylophone', 5, 2.3, 17.4, malletRowZ, true, 0)
+    addBarPercussion('Vibraphone', 6, 2.5, 10.3, malletRowZ, true, 0)
+    addCrashCymbals(14.1, malletRowZ)
+    addSnareDrum(8.1, malletRearRowZ)
+    const timpaniStart = stage.children.length
+    let rightEdge = 6
+    ;[32, 29, 26, 23].forEach((diameter) => {
+      const radius = diameter / 24 + 0.07
+      addTimpani(diameter, rightEdge - radius, rowZ, 'Active timpani', Math.PI)
+      rightEdge -= radius * 2 + 0.15
+    })
+    const quartet = stage.children.slice(timpaniStart)
+    const quartetBounds = new THREE.Box3()
+    quartet.forEach((object) => quartetBounds.union(new THREE.Box3().setFromObject(object)))
+    const center = (quartetBounds.min.x + quartetBounds.max.x) / 2
+    quartet.forEach((object) => { object.position.x -= center })
+    const remainingStart = stage.children.length
+    addTimpani(29, 0, rowZ, 'Second timpani pair', Math.PI)
+    addTimpani(26, 0, rowZ, 'Second timpani pair', Math.PI)
+    addSnareDrum(0, rowZ, 'Second snare drum')
+    addConcertBassDrum(0, rowZ)
+    addCymbalStand('Suspended cymbal', 0, rowZ)
+    addTamTam(0, rowZ)
+    addPercussionTable(0, rowZ)
+    addCongas(0, rowZ)
+    const remaining = stage.children.slice(remainingStart)
+      .map((object) => ({ object, bounds: new THREE.Box3().setFromObject(object) }))
+    const edge = -23.82
+    const start = quartetBounds.min.x - center
+    const totalWidth = remaining.reduce((sum, { bounds }) => sum + bounds.max.x - bounds.min.x, 0)
+    const gap = (start - edge - totalWidth) / (remaining.length + 1)
+    if (gap < 0.1) throw new Error('Barber percussion does not fit on the rear stage tier.')
+    let nextEdge = start - gap
+    remaining.forEach(({ object, bounds }) => {
+      object.position.x += nextEdge - bounds.max.x
+      nextEdge -= bounds.max.x - bounds.min.x + gap
+    })
+    const arcTimpani = (drums: THREE.Object3D[]) => {
+      const bounds = new THREE.Box3()
+      const radii = drums.map((drum) => {
+        const drumBounds = new THREE.Box3().setFromObject(drum)
+        bounds.union(drumBounds)
+        return (drumBounds.max.x - drumBounds.min.x) / 2
+      })
+      let x = 0
+      let z = -74.1
+      drums.forEach((drum, index) => {
+        if (index > 0) {
+          const angle = THREE.MathUtils.degToRad(
+            90 * (drums.length / 2 - index) / (drums.length - 2),
+          )
+          const distance = radii[index - 1] + radii[index] + 0.15
+          x -= distance * Math.cos(angle)
+          z += distance * Math.sin(angle)
+        }
+        drum.position.x = x
+        drum.position.z = z
+      })
+      const arcBounds = new THREE.Box3()
+      drums.forEach((drum) => arcBounds.union(new THREE.Box3().setFromObject(drum)))
+      const offset = (bounds.min.x + bounds.max.x - arcBounds.min.x - arcBounds.max.x) / 2
+      drums.forEach((drum) => { drum.position.x += offset })
+    }
+    if (scene === 'holst') {
+      const timpani = [...quartet, ...remaining.slice(0, 2).map(({ object }) => object)]
+      const bounds = new THREE.Box3()
+      timpani.forEach((object) => bounds.union(new THREE.Box3().setFromObject(object)))
+      timpani.forEach((object) => {
+        stage.remove(object)
+        disposeObject(object)
+      })
+      const diameters = [32, 26, 23, 29, 29, 26]
+      const totalWidth = diameters.reduce((sum, diameter) => sum + diameter / 12 + 0.14, 0)
+      const groupGap = bounds.max.x - bounds.min.x - totalWidth - 4 * 0.15
+      if (groupGap <= 0) throw new Error('Holst timpani groups do not fit in the percussion row.')
+      let edge = bounds.max.x
+      diameters.forEach((diameter, index) => {
+        const radius = diameter / 24 + 0.07
+        addTimpani(diameter, edge - radius, rowZ,
+          index < 3 ? 'First timpani trio' : 'Second timpani trio', Math.PI)
+        edge -= radius * 2 + (index === 2 ? groupGap : 0.15)
+      })
+      const trios = stage.children.slice(-6)
+      arcTimpani(trios.slice(0, 3))
+      arcTimpani(trios.slice(3))
+      const firstArcBounds = new THREE.Box3()
+      const secondArcBounds = new THREE.Box3()
+      trios.slice(0, 3).forEach((drum) => firstArcBounds.union(new THREE.Box3().setFromObject(drum)))
+      trios.slice(3).forEach((drum) => secondArcBounds.union(new THREE.Box3().setFromObject(drum)))
+      const shift = firstArcBounds.min.x - 0.5 - secondArcBounds.max.x
+      trios.slice(3).forEach((drum) => { drum.position.x += shift })
+      const stageLeftSnare = stage.children.slice(activePercussionStart)
+        .find((object) => object.name === 'Snare drum')
+      if (!stageLeftSnare) throw new Error('Missing stage-left snare for Holst timpani spacing.')
+      const snareBounds = new THREE.Box3().setFromObject(stageLeftSnare)
+      const blockShift = snareBounds.min.x - 0.5 - firstArcBounds.max.x
+      trios.forEach((object) => {
+        object.position.x += blockShift
+      })
+    } else {
+      arcTimpani(quartet)
+      centerTimpaniQuartet(quartet)
+    }
+    const spareTimpaniX = -6.1
+    const sparePair = remaining.slice(0, 2)
+    if (scene !== 'holst') {
+      sparePair.forEach(({ object }, index) => {
+        object.position.set(spareTimpaniX, 6, rowZ + 0.8 - index * 3)
+      })
+    }
+    // Reserve the parked pair's width even in Holst so the other marks stay fixed.
+    let stageRightEdge = spareTimpaniX
+      - Math.max(...sparePair.map(({ bounds }) => (bounds.max.x - bounds.min.x) / 2)) - 0.5
+    remaining.slice(2).forEach(({ object }) => {
+      const bounds = new THREE.Box3().setFromObject(object)
+      object.position.x += stageRightEdge - bounds.max.x
+      stageRightEdge -= bounds.max.x - bounds.min.x + 0.5
+    })
+    const malletSnare = stage.children.slice(activePercussionStart)
+      .find((object) => object.name === 'Snare drum')
+    if (!malletSnare) throw new Error('Missing stage-left snare for mallet station.')
+    malletSnare.position.set(6.1, 6, scene === 'holst' ? -77.5 : malletRowZ)
+  } else {
   // Stage left is +X; percussion progresses toward stage right (-X).
-  addBarPercussion('Glockenspiel', 3.2, 1.5, 17.9, -70.2, false, 0)
-  addBarPercussion('Xylophone', 5, 2.3, 15.35, -72.5, true, Math.PI / 2)
-  addPercussionTable(10.45, -69.4, true)
-  addBarPercussion('Vibraphone', 6, 2.5, 8.6, -72.2, true, Math.PI / 2)
+  addBarPercussion('Glockenspiel', 3.2, 1.5, 21.5, -72.2, false, 0)
+  addBarPercussion('Xylophone', 5, 2.3, 16.5, -72.2, true, 0)
+  addPercussionTable(12.8, -72.2, true)
+  addBarPercussion('Vibraphone', 6, 2.5, 8.3, -72.2, true, 0)
   const activeTimpaniDiameters = [32, 29, 26, 23]
   let timpaniX = 4.1
   let timpaniZ = -72.6
@@ -1232,6 +1485,9 @@ const createStage = () => {
     }
     addTimpani(diameter, timpaniX, timpaniZ, 'Active timpani', Math.PI)
   })
+  centerTimpaniQuartet(stage.children.filter((object) =>
+    object.userData.orchestraSection === 'Active timpani',
+  ))
   const stageRightPercussionStart = stage.children.length
   addSnareDrum(-3.65, -72.5)
   addTamTam(-5.6, -72.5)
@@ -1255,7 +1511,7 @@ const createStage = () => {
     0,
   )
   const percussionGap = (timpaniBounds.min.x - railingInnerX - instrumentsWidth)
-    / (stageRightPercussion.length + 1)
+    / (stageRightPercussion.length + 1) / 2
   if (percussionGap <= 0) throw new Error('Stage-right percussion does not fit between timpani and railing.')
   let nextRightEdge = timpaniBounds.min.x - percussionGap
   stageRightPercussion.forEach(({ object, bounds }) => {
@@ -1267,9 +1523,38 @@ const createStage = () => {
   })
 
   addTubularBells(10.2, -79)
-  addTimpani(29, 4, -77.6, 'Spare timpani')
-  addTimpani(26, 0.8, -77.6, 'Spare timpani')
-  addSnareDrum(-2.5, -77.6, 'Spare snare drum')
+  }
+
+  const percussionSetback = 1.5
+  stage.children.slice(activePercussionStart).forEach((instrument) => {
+    if (instrument.name !== 'Tubular bells') instrument.position.z -= percussionSetback
+  })
+
+  stage.children.slice(activePercussionStart).forEach((instrument) => {
+    instrument.userData.percussionActive = scene === 'barber'
+      ? instrument.userData.orchestraSection === 'Active timpani'
+      : scene === 'williams'
+        ? instrument.userData.orchestraSection === 'Active timpani'
+          || ['Snare drum', 'Second snare drum', '20-inch tam-tam', 'Crash cymbals on stand',
+            'Vibraphone', 'Glockenspiel', 'Suspended cymbal', 'Auxiliary percussion table']
+            .includes(instrument.name)
+      : scene === 'korngold'
+        ? instrument.userData.orchestraSection === 'Active timpani'
+          || ['Tubular bells', 'Glockenspiel', 'Xylophone', 'Vibraphone',
+            'Crash cymbals on stand', 'Second snare drum', 'Yamaha 7000 concert bass drum',
+            '20-inch tam-tam', 'Auxiliary percussion table', 'Suspended cymbal']
+            .includes(instrument.name)
+      : scene === 'ravel'
+        ? instrument.userData.orchestraSection === 'Active timpani'
+          || ['Glockenspiel', 'Banchan bowl percussion table', 'Snare drum',
+            'Crash cymbals on stand', 'Yamaha 7000 concert bass drum', 'Auxiliary percussion table']
+            .includes(instrument.name)
+      : scene === 'holst'
+        ? instrument.name.endsWith('-inch timpano')
+          || ['Second snare drum', 'Yamaha 7000 concert bass drum', 'Suspended cymbal', '20-inch tam-tam']
+            .includes(instrument.name)
+        : true
+  })
 
   const individualStandSections = new Set([
     'Flutes', 'Oboes', 'Clarinets', 'Bassoons',
@@ -1308,6 +1593,7 @@ const createStage = () => {
     target: THREE.Vector3,
     pencil = false,
     stereo = false,
+    handheld = false,
   ) => {
     const stand = new THREE.Group()
     stand.name = name
@@ -1370,6 +1656,22 @@ const createStage = () => {
         addTube(poleTop.clone().add(new THREE.Vector3(0, -0.65, 0)), barEnd, 0.025)
         addTube(poleTop, poleTop.clone().add(new THREE.Vector3(0, -0.65, 0)), 0.025)
       })
+    } else if (handheld) {
+      const direction = target.clone().sub(base).sub(capsulePosition).normalize()
+      const microphone = new THREE.Group()
+      microphone.name = 'SM58-style handheld speaking microphone'
+      microphone.position.copy(capsulePosition)
+      microphone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction)
+      const body = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.055, 0.04, 0.4, 12), micStandMaterial,
+      )
+      body.position.y = 0.2
+      const grille = new THREE.Mesh(new THREE.SphereGeometry(0.085, 16, 12), micMaterial)
+      grille.position.y = 0.45
+      body.castShadow = true
+      grille.castShadow = true
+      microphone.add(body, grille)
+      stand.add(microphone)
     } else {
       const direction = target.clone().sub(base).sub(capsulePosition).normalize()
       const microphone = new THREE.Mesh(
@@ -1386,27 +1688,49 @@ const createStage = () => {
     return stand
   }
   addMicrophone(
-    'Inputs 1-2: Overheads - C414 spaced inward-facing pair',
+    'Inputs 1-2: Overheads L/R',
     new THREE.Vector3(0, 32 / 12, -41.1), 8, new THREE.Vector3(),
     new THREE.Vector3(0, 5, -54), false, true,
   )
-  ;['First violins', 'Second violins', 'Violas', 'Cellos', 'Basses'].forEach((section, index) => {
+  const speakingMicBase = conductorStand.position.clone().add(new THREE.Vector3(-2, 0, 0))
+  addMicrophone(
+    'Input 28: Speech',
+    speakingMicBase, 4.2, new THREE.Vector3(),
+    speakingMicBase.clone().add(new THREE.Vector3(0, 5.2, 0.35)), false, false, true,
+  )
+  if (scene === 'barber') {
+    addMicrophone(
+      'Input 3: Violin soloist',
+      soloistPosition.clone().add(new THREE.Vector3(1.4, 0, 1.6)),
+      3.9, new THREE.Vector3(),
+      soloistPosition.clone().add(new THREE.Vector3(0.3, 4.65, 0.4)), true,
+    )
+  }
+  ;[
+    ['First violins', 'Violin 1 principal'],
+    ['Second violins', 'Violin 2 principal'],
+    ['Violas', 'Viola principal'],
+    ['Cellos', 'Cello principal'],
+    ['Basses', 'Bass principal'],
+  ].forEach(([section, label], index) => {
     if (section === 'Basses') {
       const players = stage.children.filter((object) => object.name === 'Basses')
         .sort((a, b) => a.position.distanceToSquared(conductorPosition) - b.position.distanceToSquared(conductorPosition))
         .slice(0, 2)
-      if (players.length !== 2) throw new Error('Missing principal bass pair for input 7.')
+      if (players.length !== 2) throw new Error('Missing principal bass pair for input 8.')
       const midpoint = players[0].position.clone().add(players[1].position).multiplyScalar(0.5)
       addMicrophone(
-        'Input 7: Principal bass pair - shared microphone', midpoint, 3.6,
-        new THREE.Vector3(), midpoint.clone().add(new THREE.Vector3(-0.65, 2.7, 0)), true,
+        'Input 8: Bass principal',
+        midpoint.clone().add(new THREE.Vector3(-3.5, 0, 0)), 2,
+        new THREE.Vector3(), midpoint.clone().add(new THREE.Vector3(0, 2.2, 0)), true,
       )
       return
     }
     const musicStands = stage.children.filter((object) =>
       object.userData.orchestraSection === section && object.name.endsWith('music stand'),
     )
-    const firstDeskStand = [...musicStands].sort((a, b) =>
+    const firstDeskStand = musicStands.find((stand) => stand.userData.principalDesk === true)
+      ?? [...musicStands].sort((a, b) =>
       a.position.distanceToSquared(conductorPosition) - b.position.distanceToSquared(conductorPosition),
     )[0]
     if (!firstDeskStand) throw new Error(`Missing first-desk music stand for ${section}.`)
@@ -1415,29 +1739,35 @@ const createStage = () => {
       throw new Error(`Missing music-stand facing direction for ${section}.`)
     }
     const forward = new THREE.Vector3(-Math.sin(facingYaw), 0, -Math.cos(facingYaw))
+    const isCello = section === 'Cellos'
     const base = firstDeskStand.position.clone().addScaledVector(forward, 0.7)
     const instrumentHeight = section === 'Cellos' ? 1.7 : section === 'Basses' ? 2.7 : 2.3
     const instrumentTarget = firstDeskStand.position.clone()
       .addScaledVector(forward, -0.65).add(new THREE.Vector3(0, instrumentHeight, 0))
     addMicrophone(
-      `Input ${index + 3}: Principal ${section} - first-desk microphone`, base, 3.6,
-      forward.clone().multiplyScalar(-0.7).setY(0.225),
+      `Input ${index + 4}: ${label}`, base, isCello ? 2 : 3.6,
+      isCello ? new THREE.Vector3() : forward.clone().multiplyScalar(-0.7).setY(0.225),
       instrumentTarget, true,
     )
   })
+  const firstViolinSectionSetback = scene === 'barber' ? firstViolinXs[1] - firstViolinXs[0] : 0
+  const firstViolinSectionOffset = new THREE.Vector3(
+    -firstViolinSectionSetback, 0, -firstViolinSectionSetback * 0.025,
+  )
   addMicrophone(
-    'Input 8: 1st violin section - directional microphone',
-    new THREE.Vector3(-11.5, 32 / 12, -41.7), 5.5,
-    new THREE.Vector3(0, 0, -0.8), new THREE.Vector3(-11.5, 4.5, -45),
+    'Input 9: Violin 1 section',
+    new THREE.Vector3(-11.5, 32 / 12, -41.7).add(firstViolinSectionOffset), 5.5,
+    new THREE.Vector3(0, 0, -0.8),
+    new THREE.Vector3(-11.5, 4.5, -45).add(firstViolinSectionOffset),
   )
   const violinBlend = addMicrophone(
-    'Input 9: 2nd violin section - shared violin omni (recording / cautious PA trial)',
+    'Input 10: Violin 2 section',
     new THREE.Vector3(-11.3, 4, -48.8), 5.5,
     new THREE.Vector3(0, 0, -0.8), new THREE.Vector3(-11.3, 5.8, -51),
   )
   violinBlend.userData.polarPattern = 'omnidirectional'
   const lowStringBlend = addMicrophone(
-    'Input 10: Viola/cello section - shared omni (recording / cautious PA trial)',
+    'Input 11: Viola / cello',
     new THREE.Vector3(8.2, 4, -48.8), 5.5,
     new THREE.Vector3(0, 0, -0.8), new THREE.Vector3(8.2, 5, -48.5),
   )
@@ -1455,7 +1785,7 @@ const createStage = () => {
     const microphoneReference = second.position.clone().add(new THREE.Vector3(0, 0, windsSetback))
     const base = microphoneReference.clone().add(new THREE.Vector3(0, 0, 1))
     addMicrophone(
-      `Input ${index + 17}: Winds pair - ${section} high microphone`, base, 7,
+      `Input ${index + 18}: ${section === 'Flutes' ? 'Flutes / clarinets' : 'Oboes / bassoons'}`, base, 7,
       new THREE.Vector3(target.x - base.x, 0, target.z - base.z),
       target,
     )
@@ -1463,7 +1793,7 @@ const createStage = () => {
   stage.children.filter((object) => object.name === 'Concert harp').forEach((harp, index) => {
     const offset = new THREE.Vector3(0, 0, 0.9).applyQuaternion(harp.quaternion)
     addMicrophone(
-      `Input ${index + 15}: Harp ${index + 1} close microphone`, harp.position.clone().add(offset), 3.2,
+      `Input ${index + 16}: Harp ${index + 1}`, harp.position.clone().add(offset), 3.2,
       offset.clone().multiplyScalar(-0.5),
       harp.position.clone().add(new THREE.Vector3(0, 2.8, 0)),
     )
@@ -1475,6 +1805,14 @@ const createStage = () => {
       .multiplyScalar(1 / players.length)
     const isHorns = section === 'Horns'
     const isTuba = section === 'Tuba'
+    const fourthTrombone = isTuba
+      ? stage.children.filter((object) => object.name === 'Trombones')
+        .sort((a, b) => b.position.x - a.position.x)[0]
+      : undefined
+    if (isTuba && !fourthTrombone) throw new Error('Missing fourth trombone for shared tuba microphone.')
+    const lowBrassMidpoint = fourthTrombone
+      ? center.clone().add(fourthTrombone.position).multiplyScalar(0.5)
+      : center
     const rearRowZ = Math.min(...players.map((player) => player.position.z))
     const rearHorns = isHorns
       ? players.filter((player) => player.position.z < center.z)
@@ -1487,33 +1825,33 @@ const createStage = () => {
     const base = isHorns
       ? new THREE.Vector3(Math.min(...players.map((player) => player.position.x)) - 0.5, 6, rearRowZ - 1.4)
       : isTuba
-        ? center.clone().add(new THREE.Vector3(1.4, 0, 0.2))
-        : center.clone().add(new THREE.Vector3(0, 0, 2.7))
+        ? lowBrassMidpoint.clone().add(new THREE.Vector3(0, 0, 0.2))
+        : new THREE.Vector3(center.x, center.y, brassRowZ + 2.7)
     const boom = isHorns
       ? new THREE.Vector3(1, 0, 0.5)
       : isTuba
-        ? new THREE.Vector3(-1.4, 0, 0.2)
-        : new THREE.Vector3(0, 0, -0.8)
+        ? new THREE.Vector3(0, 0, 0.2)
+        : new THREE.Vector3()
     // Instrument bodies are not modeled; bell targets are illustrative.
     const target = isHorns
       ? hornBellTarget
-      : center.clone().add(new THREE.Vector3(0, isTuba ? 3.2 : 2.5, 0.4))
+      : (isTuba ? lowBrassMidpoint : center).clone()
+        .add(new THREE.Vector3(0, isTuba ? 3.2 : 2.5, 0.4))
     addMicrophone(
-      `Input ${index + 19}: ${isHorns ? 'Horns section microphone behind bells'
-        : isTuba ? 'Tuba dedicated microphone above bell' : `${section} section microphone`}`,
+      `Input ${index + 20}: ${isTuba && scene === 'holst' ? 'Tuba / euphonium' : section}`,
       base, isTuba ? 4.5 : 4, boom, target,
     )
   })
   ;[
-    { x: -20, targetX: -20 },
-    { x: -7, targetX: -7 },
-    { x: 6.2, targetX: 1 },
-    { x: 13, targetX: 13 },
-  ].forEach(({ x, targetX }, index) => {
+    { x: -19, targetX: -18, targetZ: -75.5 },
+    { x: -9, targetX: -8, targetZ: -75.5 },
+    { x: 2, targetX: 0, targetZ: -75.5 },
+    { x: 18, targetX: 16, targetZ: -73.5 },
+  ].forEach(({ x, targetX, targetZ }, index) => {
     addMicrophone(
-      `Input ${index + 23}: Percussion zone microphone ${index + 1}`,
-      new THREE.Vector3(x, 6, -72), 6,
-      new THREE.Vector3(0, 0, -0.5), new THREE.Vector3(targetX, 8.5, -74),
+      `Input ${index + 24}: Percussion ${index + 1}`,
+      new THREE.Vector3(x, 6, -71), 6,
+      new THREE.Vector3(0, 0, -0.5), new THREE.Vector3(targetX, 9, targetZ),
     )
   })
 
@@ -1540,14 +1878,37 @@ const createStage = () => {
   cameraPole.position.y = 2.96
   cameraPole.castShadow = true
   windsCameraRig.add(cameraPole)
+  const conductorCamera = new THREE.Group()
+  conductorCamera.name = 'Phone camera facing conductor'
+  conductorCamera.userData.cameraView = true
+  conductorCamera.userData.focalLength = 26
+  conductorCamera.userData.lensOffset = 0.06
+  conductorCamera.position.set(0, 5.75, 0.12)
+  conductorCamera.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, 0, -1),
+    mannequin.position.clone().add(new THREE.Vector3(0, torso.position.y, 0))
+      .sub(windsCameraRig.position).sub(conductorCamera.position).normalize(),
+  )
+  const phoneBody = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.25, 0.035), micStandMaterial)
+  const phoneLens = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.02, 16), micMaterial)
+  phoneLens.rotation.x = Math.PI / 2
+  phoneLens.position.z = -0.0275
+  conductorCamera.add(phoneBody, phoneLens)
+  const phoneMount = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.06, 0.12), micStandMaterial)
+  phoneMount.position.set(0, conductorCamera.position.y, 0.06)
+  windsCameraRig.add(conductorCamera, phoneMount)
   stage.add(windsCameraRig)
 
   const sectionMaterialsForHover = new Map<string, THREE.MeshStandardMaterial>()
   const replacedMaterials = new Set<THREE.MeshStandardMaterial>()
   stage.children.forEach((object) => {
     if (!(object instanceof THREE.Group)) return
-    const section = object.userData.orchestraSection
+    const originalSection = object.userData.orchestraSection
       ?? (object.name.endsWith('-inch timpano') ? 'Timpani' : object.name)
+    const active: unknown = object.userData.percussionActive
+    const section = typeof active === 'boolean'
+      ? `${object.name} — ${active ? 'active' : 'parked / inactive'} in ${scene}`
+      : originalSection
     object.userData.orchestraSection = section
     object.traverse((part) => {
       if (!(part instanceof THREE.Mesh)) return
@@ -1558,6 +1919,13 @@ const createStage = () => {
         let clone = sectionMaterialsForHover.get(key)
         if (!clone) {
           clone = material.clone()
+          if (active === false) {
+            clone.color.setHex(0x9a9e9b)
+            clone.metalness = 0
+            clone.roughness = 0.9
+            clone.transparent = false
+            clone.opacity = 1
+          }
           sectionMaterialsForHover.set(key, clone)
         }
         return clone
@@ -1568,14 +1936,14 @@ const createStage = () => {
     })
   })
   replacedMaterials.forEach((material) => material.dispose())
-  stage.position.z = 2.25
+  stage.position.z = stageOffset
   return stage
 }
 
 // Share the procedural scene without maintaining a second stage layout.
 // oxlint-disable-next-line react/only-export-components
-export const createStagePlan = () => {
-  const stage = createStage()
+export const createStagePlan = (scene: StageScene = 'barber') => {
+  const stage = createStage(scene)
   try {
     stage.updateMatrixWorld(true)
     const items = stage.children.filter((object) =>
@@ -1589,6 +1957,7 @@ export const createStagePlan = () => {
       if (microphone) {
         object.children.filter((child) =>
           child.name === 'Pencil microphone' || child.name === 'Condenser microphone'
+          || child.name === 'SM58-style handheld speaking microphone'
           || child.name === 'AKG C414 inward-facing cardioid microphone',
         ).forEach((child) => {
           const position = child.getWorldPosition(new THREE.Vector3())
@@ -1608,6 +1977,8 @@ export const createStagePlan = () => {
         centerZ: (bounds.min.z + bounds.max.z) / 2 - stage.position.z,
         capsules,
         stairCount: typeof object.userData.stairCount === 'number' ? object.userData.stairCount : 0,
+        percussionActive: typeof object.userData.percussionActive === 'boolean'
+          ? object.userData.percussionActive : null,
       }
     })
     return items
@@ -1616,16 +1987,158 @@ export const createStagePlan = () => {
   }
 }
 
+const createStageLighting = () => {
+  const rig = new THREE.Group()
+  rig.name = 'Two suspended front-of-house stage lighting bars (schematic)'
+  const metal = new THREE.MeshStandardMaterial({
+    color: 0x242729, metalness: 0.65, roughness: 0.45,
+  })
+  const lensMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffe6bc, emissive: 0xffd49a, emissiveIntensity: 0.8,
+  })
+  const addTube = (start: THREE.Vector3, end: THREE.Vector3, radius: number) => {
+    const direction = end.clone().sub(start)
+    const tube = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius, radius, direction.length(), 8), metal,
+    )
+    tube.position.copy(start).add(end).multiplyScalar(0.5)
+    tube.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize())
+    rig.add(tube)
+  }
+
+  fohBarCenters.forEach((centerX) => {
+    const barZ = -1.5
+    const barHeight = 27
+    ;[-0.4, 0.4].forEach((offsetZ) => {
+      ;[barHeight, barHeight + 0.8].forEach((y) => {
+        addTube(
+          new THREE.Vector3(centerX - 5, y, barZ + offsetZ),
+          new THREE.Vector3(centerX + 5, y, barZ + offsetZ), 0.07,
+        )
+      })
+      for (let bay = 0; bay < 5; bay++) {
+        const x = centerX - 5 + bay * 2
+        addTube(
+          new THREE.Vector3(x, barHeight, barZ + offsetZ),
+          new THREE.Vector3(x + 2, barHeight + 0.8, barZ + offsetZ), 0.045,
+        )
+        addTube(
+          new THREE.Vector3(x, barHeight + 0.8, barZ + offsetZ),
+          new THREE.Vector3(x + 2, barHeight, barZ + offsetZ), 0.045,
+        )
+      }
+    })
+    ;[-5, 5].forEach((offsetX) => {
+      addTube(
+        new THREE.Vector3(centerX + offsetX, barHeight, barZ - 0.4),
+        new THREE.Vector3(centerX + offsetX, barHeight, barZ + 0.4), 0.07,
+      )
+      addTube(
+        new THREE.Vector3(centerX + offsetX, barHeight + 0.8, barZ),
+        new THREE.Vector3(centerX + offsetX, roomHeight, barZ), 0.045,
+      )
+    })
+
+    stageWashTargets.forEach((aim, index) => {
+      const x = centerX + (index - 1.5) * 2.4
+      addTube(new THREE.Vector3(x, barHeight, barZ), new THREE.Vector3(x, 26, barZ), 0.06)
+      const fixture = new THREE.Group()
+      fixture.name = `FOH ${centerX < 0 ? 'audience-left' : 'audience-right'} spotlight ${index + 1}`
+      fixture.position.set(x, 25.8, barZ)
+      const target = new THREE.Object3D()
+      target.position.set(aim.x, aim.y, aim.z)
+      fixture.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 0, -1), target.position.clone().sub(fixture.position).normalize(),
+      )
+      const housing = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.28, 1.25, 16), metal)
+      housing.rotation.x = Math.PI / 2
+      housing.position.z = 0.25
+      const lens = new THREE.Mesh(new THREE.CircleGeometry(0.27, 16), lensMaterial)
+      lens.rotation.y = Math.PI
+      lens.position.z = -0.39
+      fixture.add(housing, lens)
+      const spot = createStageSpotlight()
+      spot.name = `${fixture.name} stage wash`
+      spot.position.z = -0.42
+      spot.target = target
+      // Four shadow maps keep the overlapping eight-fixture wash affordable.
+      spot.castShadow = index === 1 || index === 3
+      spot.shadow.mapSize.set(1024, 1024)
+      spot.shadow.camera.near = 1
+      spot.shadow.camera.far = 125
+      spot.shadow.bias = -0.0002
+      spot.shadow.normalBias = 0.08
+      fixture.add(spot)
+      rig.add(fixture, target)
+    })
+  })
+  return rig
+}
+
+const defaultHouseLightLevel = 15
+const applyHouseLightLevel = (lighting: THREE.Object3D, level: number) => {
+  applyRoomLightmapLevel(lighting, level)
+  lighting.traverse((object) => {
+    const stage = object.userData.stageCeilingLight === true
+    if (object instanceof THREE.LineSegments && object.userData.roomEdge === true
+      && object.material instanceof THREE.LineBasicMaterial) {
+      object.material.opacity = 0.08 + 0.32 * level / 100
+    }
+    if (object instanceof THREE.SpotLight && object.userData.houseLight === true) {
+      const minimum = stage ? stageCeilingMinimum : 0
+      object.intensity = minimum + (fullHouseLightIntensity - minimum) * level / 100
+    }
+    if (object instanceof THREE.Mesh && object.userData.houseLightDiffuser === true
+      && object.material instanceof THREE.MeshStandardMaterial) {
+      const minimum = stage ? 0.6 : 0
+      object.material.emissiveIntensity = minimum + (0.8 - minimum) * level / 100
+    }
+  })
+}
+
+const createCeilingLighting = () => {
+  const lighting = new THREE.Group()
+  lighting.name = 'Ceiling lights: adjustable stage and audience wash (schematic)'
+  const fill = new THREE.AmbientLight(0xdce3ef, 0.025)
+  fill.name = 'Minimal navigation fill; room indirect light is baked'
+  lighting.add(fill)
+  const housingMaterial = new THREE.MeshStandardMaterial({ color: 0x7b807d, roughness: 0.8 })
+  ceilingZones.forEach((zone) => {
+    const diffuserMaterial = new THREE.MeshStandardMaterial({
+      color: 0xfff0d7, emissive: 0xffe6bd, emissiveIntensity: 0,
+    })
+    const columns = ceilingColumns(zone.stage)
+    columns.forEach((x) => {
+      const fixture = new THREE.Group()
+      fixture.name = `${zone.name} ceiling light`
+      fixture.position.set(x, roomHeight - 0.2, zone.z)
+      const housing = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 2), housingMaterial)
+      const diffuser = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.04, 1.8), diffuserMaterial)
+      diffuser.position.y = -0.12
+      diffuser.userData.houseLightDiffuser = true
+      diffuser.userData.stageCeilingLight = zone.stage
+      const target = new THREE.Object3D()
+      target.position.set(x, zone.stage ? 6 : 0, zone.z)
+      const light = createCeilingSpotlight()
+      light.name = `${fixture.name} downlight`
+      light.userData.houseLight = true
+      light.userData.stageCeilingLight = zone.stage
+      light.target = target
+      light.position.y = -0.15
+      fixture.add(housing, diffuser, light)
+      lighting.add(fixture, target)
+    })
+  })
+  applyHouseLightLevel(lighting, defaultHouseLightLevel)
+  return lighting
+}
+
 const createRoom = () => {
   const room = new THREE.Group()
   room.name = '100 by 160 by 31 foot room'
 
-  const outline = [
-    [-37, -80], [50, -80], [50, 80], [-50, 80],
-    [-50, -60], [-40, -60], [-40, -63], [-37, -63],
-  ]
   const floorShape = new THREE.Shape()
-  outline.forEach(([x, z], index) => {
+  roomOutline.forEach(([x, z], index) => {
     if (index === 0) floorShape.moveTo(x, -z)
     else floorShape.lineTo(x, -z)
   })
@@ -1636,22 +2149,27 @@ const createRoom = () => {
   )
   floor.rotation.x = -Math.PI / 2
   floor.receiveShadow = true
+  floor.userData.roomLightmapSurface = 'floor'
   room.add(floor)
 
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: 0xe8ebe6,
-    depthWrite: false,
-    opacity: 0.11,
-    side: THREE.DoubleSide,
-    transparent: true,
-  })
+  const ceiling = new THREE.Mesh(
+    new THREE.ShapeGeometry(floorShape),
+    new THREE.MeshStandardMaterial({ color: 0xe8ebe6, roughness: 0.95, side: THREE.BackSide }),
+  )
+  ceiling.name = 'Room ceiling'
+  ceiling.rotation.x = -Math.PI / 2
+  ceiling.position.y = roomHeight
+  ceiling.userData.roomLightmapSurface = 'ceiling'
+  room.add(ceiling)
+
   const addWall = (x1: number, z1: number, x2: number, z2: number, bottom = 0, height = roomHeight) => {
     const wall = new THREE.Mesh(
       new THREE.BoxGeometry(Math.hypot(x2 - x1, z2 - z1), height, 0.2),
-      wallMaterial,
+      new THREE.MeshStandardMaterial({ color: 0xe8ebe6, side: THREE.DoubleSide, roughness: 0.95 }),
     )
     wall.position.set((x1 + x2) / 2, bottom + height / 2, (z1 + z2) / 2)
     wall.rotation.y = -Math.atan2(z2 - z1, x2 - x1)
+    wall.userData.roomLightmapSurface = roomWallAt(wall.position.x, wall.position.z)
     room.add(wall)
     const edge = new THREE.LineSegments(
       new THREE.EdgesGeometry(wall.geometry),
@@ -1659,6 +2177,7 @@ const createRoom = () => {
     )
     edge.position.copy(wall.position)
     edge.rotation.copy(wall.rotation)
+    edge.userData.roomEdge = true
     room.add(edge)
   }
   addWall(-37, -80, 50, -80)
@@ -1679,14 +2198,18 @@ const createRoom = () => {
   garage.rotation.y = Math.PI / 2
   garage.position.set(-50, 7, -46)
   garage.name = 'Flush garage door'
+  garage.userData.roomLightmapSurface = roomWallAt(-50, -46)
   room.add(garage)
 
-  const doorMaterial = new THREE.MeshStandardMaterial({ color: 0x81968b, side: THREE.DoubleSide })
   const addDoorPair = (x: number, z: number) => {
     ;[x + 1.5, x + 4.5].forEach((centerX) => {
-      const leaf = new THREE.Mesh(new THREE.BoxGeometry(2.96, 7, 0.12), doorMaterial)
+      const leaf = new THREE.Mesh(
+        new THREE.BoxGeometry(2.96, 7, 0.12),
+        new THREE.MeshStandardMaterial({ color: 0x81968b, side: THREE.DoubleSide }),
+      )
       leaf.position.set(centerX, 3.5, z)
       leaf.name = 'Closed door leaf'
+      leaf.userData.roomLightmapSurface = roomWallAt(centerX, z)
       room.add(leaf)
     })
   }
@@ -1754,70 +2277,12 @@ const createRoom = () => {
     techEquipment.add(leg)
   })
 
-  const lift = new THREE.Group()
-  lift.name = 'Extended scissor lift: 20-foot camera platform'
-  lift.position.set(46, 0, -57.75)
-  const liftMaterial = new THREE.MeshStandardMaterial({ color: 0xc89931, roughness: 0.6, metalness: 0.35 })
-  const liftFrameMaterial = new THREE.MeshStandardMaterial({ color: 0x303a36, roughness: 0.6, metalness: 0.5 })
-  const addLiftBox = (width: number, height: number, depth: number, x: number, y: number, z: number) => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), liftMaterial)
-    mesh.position.set(x, y, z)
-    mesh.castShadow = true
-    mesh.receiveShadow = true
-    lift.add(mesh)
-  }
-  addLiftBox(3.5, 0.7, 6, 0, 0.9, 0)
-  ;[-1.65, 1.65].forEach((x) => {
-    ;[-2.2, 2.2].forEach((z) => {
-      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 0.3, 16), liftFrameMaterial)
-      wheel.rotation.z = Math.PI / 2
-      wheel.position.set(x, 0.6, z)
-      lift.add(wheel)
-    })
+  room.traverse((object) => {
+    if (object instanceof THREE.Mesh && typeof object.userData.roomLightmapSurface === 'string') {
+      attachRoomLightmap(object, object.userData.roomLightmapSurface)
+    }
   })
-  const addLiftArm = (start: THREE.Vector3, end: THREE.Vector3) => {
-    const direction = end.clone().sub(start)
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.18, direction.length(), 0.24), liftFrameMaterial)
-    arm.position.copy(start).add(end).multiplyScalar(0.5)
-    arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize())
-    arm.castShadow = true
-    lift.add(arm)
-  }
-  for (let level = 0; level < 5; level++) {
-    const bottom = 1.25 + level * 3.71
-    const top = bottom + 3.71
-    ;[-1.3, 1.3].forEach((x) => {
-      addLiftArm(new THREE.Vector3(x, bottom, -2.4), new THREE.Vector3(x, top, 2.4))
-      addLiftArm(new THREE.Vector3(x, bottom, 2.4), new THREE.Vector3(x, top, -2.4))
-    })
-  }
-  addLiftBox(3.5, 0.2, 6, 0, 19.9, 0)
-  ;[-1.65, 1.65].forEach((x) => {
-    ;[-2.9, 0, 2.9].forEach((z) => addLiftBox(0.1, 3.5, 0.1, x, 21.75, z))
-    ;[21.75, 23.5].forEach((y) => addLiftBox(0.1, 0.1, 5.8, x, y, 0))
-  })
-  ;[-2.9, 2.9].forEach((z) => {
-    ;[21.75, 23.5].forEach((y) => addLiftBox(3.3, 0.1, 0.1, 0, y, z))
-  })
-  const liftCamera = new THREE.Group()
-  liftCamera.name = 'Scissor lift camera aimed at stage'
-  liftCamera.userData.cameraView = true
-  liftCamera.userData.focalLength = 16
-  liftCamera.position.set(-1, 22.5, 0)
-  const stageTarget = new THREE.Vector3(0, 5, -57.75)
-  liftCamera.quaternion.setFromUnitVectors(
-    new THREE.Vector3(0, 0, -1),
-    stageTarget.clone().sub(lift.position).sub(liftCamera.position).normalize(),
-  )
-  const housing = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.6, 1), liftFrameMaterial)
-  const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.4, 16), liftFrameMaterial)
-  lens.rotation.x = Math.PI / 2
-  lens.position.z = -0.7
-  liftCamera.add(housing, lens)
-  lift.add(liftCamera)
-  addLiftArm(new THREE.Vector3(-1, 20, 0), liftCamera.position)
-  room.add(lift)
-
+  applyRoomLightmapLevel(room, defaultHouseLightLevel)
   return room
 }
 
@@ -1965,13 +2430,15 @@ const createAudience = (seats: VenueSeat[]) => {
 
   const wheelchairTexture = createWheelchairTexture()
   const wheelchairMaterials = {
-    occupied: new THREE.MeshBasicMaterial({
+    occupied: new THREE.MeshStandardMaterial({
       map: wheelchairTexture,
+      roughness: 1,
       side: THREE.DoubleSide,
       transparent: true,
     }),
-    empty: new THREE.MeshBasicMaterial({
+    empty: new THREE.MeshStandardMaterial({
       map: wheelchairTexture,
+      roughness: 1,
       opacity: 0.28,
       side: THREE.DoubleSide,
       transparent: true,
@@ -1985,6 +2452,7 @@ const createAudience = (seats: VenueSeat[]) => {
       wheelchairMaterials[seat.occupied ? 'occupied' : 'empty'],
     )
     marker.position.set(transform.x, 0.035, transform.z)
+    marker.receiveShadow = true
     marker.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), transform.yaw)
     marker.rotateX(-Math.PI / 2)
     marker.userData.seatView = { ...transform, id: seat.id }
@@ -1994,38 +2462,79 @@ const createAudience = (seats: VenueSeat[]) => {
   return audience
 }
 
-type ViewPreset = 'overview' | 'birds-eye' | 'rear' | 'lift' | 'stage'
+type ViewPreset = 'overview' | 'birds-eye' | 'rear' | 'stage' | 'conductor'
 const cameraPresetNames = {
   rear: 'Rear tech camera',
-  lift: 'Scissor lift camera aimed at stage',
   stage: 'Stage camera facing center winds',
+  conductor: 'Phone camera facing conductor',
 }
 
-export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3DProps) {
+export default function Venue3D({ seats, audienceTotal, totalCapacity, stageScene, onSceneChange, controlsHost }: Venue3DProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const controlsDockRef = useRef<HTMLDivElement>(null)
+  const controlsToggleRef = useRef<HTMLButtonElement>(null)
+  const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
+  const previousFullscreenRef = useRef(false)
   const axisGuideRef = useRef<SVGSVGElement>(null)
   const axisGuideId = useId()
   const helpId = useId()
+  const controlsId = useId()
   const sceneRef = useRef<THREE.Scene | null>(null)
   const viewPresetRef = useRef<((preset: ViewPreset) => void) | null>(null)
+  const stageSceneRef = useRef<((scene: StageScene) => void) | null>(null)
+  const [viewPreset, setViewPreset] = useState<ViewPreset | 'custom'>('birds-eye')
   const [error, setError] = useState<string | null>(null)
   const [interactionError, setInteractionError] = useState<string | null>(null)
-  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [fullscreenControlsHost, setFullscreenControlsHost] = useState<HTMLDivElement | null>(null)
+  const isFullscreen = fullscreenControlsHost !== null
   const [isSeatView, setIsSeatView] = useState(false)
-  const [cameraViewLabel, setCameraViewLabel] = useState<string | null>(null)
+  const [cameraViewLabel, setCameraViewLabel] = useState<string | null>("Bird's eye view")
   const [cameraLens, setCameraLens] = useState<number | null>(null)
   const [cameraHorizontalFov, setCameraHorizontalFov] = useState<number | null>(null)
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 })
   const [hoveredSection, setHoveredSection] = useState<string | null>(null)
   const [isHelpOpen, setIsHelpOpen] = useState(false)
+  const [isControlsOpen, setIsControlsOpen] = useState(false)
+  const [houseLightLevel, setHouseLightLevel] = useState(defaultHouseLightLevel)
 
   useEffect(() => {
     const syncFullscreenState = () => {
-      setIsFullscreen(document.fullscreenElement === containerRef.current)
+      setFullscreenControlsHost(
+        document.fullscreenElement === containerRef.current ? containerRef.current : null,
+      )
+      setIsControlsOpen(false)
     }
     document.addEventListener('fullscreenchange', syncFullscreenState)
     return () => document.removeEventListener('fullscreenchange', syncFullscreenState)
   }, [])
+
+  useEffect(() => {
+    if (previousFullscreenRef.current === isFullscreen) return
+    previousFullscreenRef.current = isFullscreen
+    const toggle = controlsToggleRef.current
+    if (!isFullscreen && toggle && toggle.getClientRects().length > 0) toggle.focus()
+    else fullscreenButtonRef.current?.focus()
+  }, [isFullscreen])
+
+  useEffect(() => {
+    if (!isControlsOpen) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !controlsDockRef.current?.contains(event.target)) {
+        setIsControlsOpen(false)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setIsControlsOpen(false)
+      controlsToggleRef.current?.focus()
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [isControlsOpen])
 
   useEffect(() => {
     const container = containerRef.current
@@ -2040,38 +2549,35 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
       scene.background = new THREE.Color(0xe8ece7)
       sceneRef.current = scene
 
-      const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 400)
-      const overviewPosition = new THREE.Vector3(77, 66, 118)
+      const overviewFov = 65
+      const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 400)
+      const overviewPosition = new THREE.Vector3(45, 29, 75)
       const overviewTarget = new THREE.Vector3(0, 5, -10)
-      camera.position.copy(overviewPosition)
+      const birdsEyePosition = new THREE.Vector3(0, 29, -24)
+      const birdsEyeTarget = new THREE.Vector3(0, 4, -57.75)
+      camera.position.copy(birdsEyePosition)
+      camera.lookAt(birdsEyeTarget)
 
       const activeRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
       renderer = activeRenderer
       activeRenderer.outputColorSpace = THREE.SRGBColorSpace
+      activeRenderer.toneMapping = THREE.ACESFilmicToneMapping
       activeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
       activeRenderer.shadowMap.enabled = true
       activeRenderer.shadowMap.type = THREE.PCFShadowMap
       container.prepend(activeRenderer.domElement)
 
       const controls = new OrbitControls(camera, activeRenderer.domElement)
-      controls.target.copy(overviewTarget)
-      controls.enableDamping = true
-      controls.dampingFactor = 0.07
+      controls.target.copy(birdsEyeTarget)
+      controls.enableRotate = false
+      controls.enableDamping = false
       controls.maxDistance = 280
-      controls.minDistance = 28
-      controls.maxPolarAngle = Math.PI / 2.02
+      controls.minDistance = 0.5
+      controls.maxPolarAngle = Math.PI - 0.01
 
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x5d665f, 2.2))
-      const keyLight = new THREE.DirectionalLight(0xfff3d6, 3.2)
-      keyLight.position.set(-35, 55, 20)
-      keyLight.castShadow = true
-      keyLight.shadow.mapSize.set(2048, 2048)
-      keyLight.shadow.camera.left = -70
-      keyLight.shadow.camera.right = 70
-      keyLight.shadow.camera.top = 90
-      keyLight.shadow.camera.bottom = -90
-      scene.add(keyLight)
-      const stage = createStage()
+      scene.add(createStageLighting(), createCeilingLighting())
+      let stage = createStage()
+      let currentStageScene: StageScene = 'barber'
       scene.add(createRoom(), stage)
 
       type CameraTransition = {
@@ -2092,6 +2598,7 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         toTarget: THREE.Vector3,
         toFov: number,
       ) => {
+        constrainCameraPosition(toPosition)
         cameraTransition = {
           startedAt: performance.now(),
           fromPosition: camera.position.clone(),
@@ -2107,11 +2614,15 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         }
         controls.enabled = false
       }
+      const onOrbitStart = () => {
+        if (!cameraTransition) setViewPreset('custom')
+      }
+      controls.addEventListener('start', onOrbitStart)
 
       const raycaster = new THREE.Raycaster()
       const pointer = new THREE.Vector2()
       const highlightMaterials = new Map<string, Set<THREE.MeshStandardMaterial>>()
-      stage.children.forEach((group) => {
+      const collectHighlightMaterials = () => stage.children.forEach((group) => {
         const section = group.userData.orchestraSection
         if (typeof section !== 'string') return
         const materials = highlightMaterials.get(section) ?? new Set<THREE.MeshStandardMaterial>()
@@ -2124,6 +2635,7 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         })
         highlightMaterials.set(section, materials)
       })
+      collectHighlightMaterials()
       let activeSection: string | null = null
       const selectSection = (section: string | null) => {
         if (section === activeSection) return
@@ -2135,6 +2647,24 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
           highlightMaterials.get(section)?.forEach((material) => material.emissive.setHex(0x554522))
         }
         setHoveredSection(section)
+      }
+      stageSceneRef.current = (nextScene) => {
+        if (nextScene === currentStageScene) return
+        try {
+          const nextStage = createStage(nextScene)
+          selectSection(null)
+          scene.remove(stage)
+          disposeObject(stage)
+          stage = nextStage
+          scene.add(stage)
+          highlightMaterials.clear()
+          collectHighlightMaterials()
+          currentStageScene = nextScene
+          setInteractionError(null)
+        } catch (caughtError) {
+          console.error('Could not switch the stage scene.', caughtError)
+          setInteractionError('Could not load the stage scene. Please reload to try again.')
+        }
       }
       const selectCamera = (cameraModel: THREE.Object3D) => {
         const focalLength: unknown = cameraModel.userData.focalLength
@@ -2154,7 +2684,8 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         const orientation = cameraModel.getWorldQuaternion(new THREE.Quaternion())
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(orientation)
         const lensPosition = cameraModel.getWorldPosition(new THREE.Vector3())
-          .addScaledVector(forward, cameraModel.userData.horizontalFov === 120 ? 0.14 : 0.95)
+          .addScaledVector(forward, cameraModel.userData.lensOffset
+            ?? (cameraModel.userData.horizontalFov === 120 ? 0.14 : 0.95))
         const target = cameraModel.name === 'Rear tech camera'
           ? new THREE.Vector3(0, 5, -57.75)
           : lensPosition.clone().addScaledVector(forward, 60)
@@ -2162,6 +2693,10 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         startCameraTransition(lensPosition, target, cameraViewportFov(focalLength, camera.aspect))
         setIsSeatView(false)
         setCameraViewLabel(cameraModel.name)
+        setViewPreset(
+          cameraModel.name === cameraPresetNames.rear ? 'rear'
+            : cameraModel.name === cameraPresetNames.conductor ? 'conductor' : 'stage',
+        )
       }
       viewPresetRef.current = (preset) => {
         if (preset !== 'overview' && preset !== 'birds-eye') {
@@ -2179,20 +2714,46 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
           return
         }
         selectSection(null)
+        setViewPreset(preset)
         setInteractionError(null)
         setIsSeatView(false)
         setCameraViewLabel(preset === 'birds-eye' ? "Bird's eye view" : null)
         setCameraLens(null)
         setCameraHorizontalFov(null)
         selectedFocalLength = null
-        controls.maxPolarAngle = Math.PI / 2.02
+        controls.maxPolarAngle = Math.PI - 0.01
         startCameraTransition(
-          preset === 'birds-eye' ? new THREE.Vector3(0, 29, -24) : overviewPosition.clone(),
-          preset === 'birds-eye' ? new THREE.Vector3(0, 4, -57.75) : overviewTarget.clone(),
-          preset === 'birds-eye' ? 70 : 38,
+          preset === 'birds-eye' ? birdsEyePosition.clone() : overviewPosition.clone(),
+          preset === 'birds-eye' ? birdsEyeTarget.clone() : overviewTarget.clone(),
+          preset === 'birds-eye' ? 70 : overviewFov,
         )
       }
       const onPointerMove = (event: PointerEvent) => {
+        if (pointerStart?.id === event.pointerId && !cameraTransition) {
+          if (!pointerStart.dragged
+            && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) <= 6) return
+          pointerStart.dragged = true
+          if (pointerStart.pan) {
+            selectSection(null)
+            return
+          }
+          activeRenderer.domElement.classList.add('is-aiming')
+          aimCamera(
+            camera, controls.target,
+            event.clientX - pointerStart.lastX, event.clientY - pointerStart.lastY,
+            activeRenderer.domElement.clientHeight,
+          )
+          pointerStart.lastX = event.clientX
+          pointerStart.lastY = event.clientY
+          selectSection(null)
+          setIsSeatView(false)
+          setViewPreset('custom')
+          setCameraViewLabel(null)
+          setCameraLens(null)
+          setCameraHorizontalFov(null)
+          selectedFocalLength = null
+          return
+        }
         if (event.buttons || cameraTransition) {
           selectSection(null)
           return
@@ -2211,19 +2772,41 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         selectSection(object ? object.userData.orchestraSection : null)
       }
       const onPointerLeave = () => selectSection(null)
-      let pointerStart: { x: number; y: number } | null = null
+      let pointerStart: {
+        id: number; x: number; y: number; lastX: number; lastY: number; dragged: boolean; pan: boolean
+      } | null = null
+      const cancelPointerLook = () => {
+        activeRenderer.domElement.classList.remove('is-aiming')
+        if (pointerStart && activeRenderer.domElement.hasPointerCapture(pointerStart.id)) {
+          activeRenderer.domElement.releasePointerCapture(pointerStart.id)
+        }
+        pointerStart = null
+      }
       const onPointerDown = (event: PointerEvent) => {
         activeRenderer.domElement.focus({ preventScroll: true })
-        if (event.button === 0) pointerStart = { x: event.clientX, y: event.clientY }
+        if (!event.isPrimary) {
+          cancelPointerLook()
+          return
+        }
+        if (event.button === 0 && !cameraTransition) {
+          pointerStart = {
+            id: event.pointerId, x: event.clientX, y: event.clientY,
+            lastX: event.clientX, lastY: event.clientY, dragged: false,
+            pan: event.shiftKey || event.ctrlKey || event.metaKey,
+          }
+          activeRenderer.domElement.setPointerCapture(event.pointerId)
+        }
       }
       const onPointerUp = (event: PointerEvent) => {
-        if (!pointerStart || event.button !== 0) return
+        if (!pointerStart || pointerStart.id !== event.pointerId || event.button !== 0) return
+        const dragged = pointerStart.dragged
+        const pan = pointerStart.pan
         const movement = Math.hypot(
           event.clientX - pointerStart.x,
           event.clientY - pointerStart.y,
         )
-        pointerStart = null
-        if (movement > 6) return
+        cancelPointerLook()
+        if (pan || dragged || movement > 6 || cameraTransition) return
 
         const bounds = activeRenderer.domElement.getBoundingClientRect()
         pointer.x = (event.clientX - bounds.left) / bounds.width * 2 - 1
@@ -2266,11 +2849,12 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
             35,
           )
           setIsSeatView(true)
+          setViewPreset('custom')
           setCameraViewLabel(null)
           setCameraLens(null)
           setCameraHorizontalFov(null)
           selectedFocalLength = null
-          controls.maxPolarAngle = Math.PI / 2.02
+          controls.maxPolarAngle = Math.PI - 0.01
           break
         }
       }
@@ -2278,8 +2862,11 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
       activeRenderer.domElement.addEventListener('pointerup', onPointerUp)
       activeRenderer.domElement.addEventListener('pointermove', onPointerMove)
       activeRenderer.domElement.addEventListener('pointerleave', onPointerLeave)
+      activeRenderer.domElement.addEventListener('pointercancel', cancelPointerLook)
+      activeRenderer.domElement.addEventListener('lostpointercapture', cancelPointerLook)
+      window.addEventListener('blur', cancelPointerLook)
       activeRenderer.domElement.tabIndex = 0
-      activeRenderer.domElement.setAttribute('aria-label', '3D venue navigation. WASD to fly, Q down, E up, Shift to move faster.')
+      activeRenderer.domElement.setAttribute('aria-label', '3D venue navigation. Drag to look around, Shift-drag to pan. WASD to fly, Q down, E up, Shift to move faster.')
       const flightKeys = new Set<string>()
       const navigationKeys = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight'])
       const clearFlightKeys = () => flightKeys.clear()
@@ -2344,6 +2931,7 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         })
       }
 
+      const unconstrainedPosition = new THREE.Vector3()
       const animate = () => {
         const now = performance.now()
         const deltaSeconds = Math.min((now - previousFrameTime) / 1000, 0.05)
@@ -2396,12 +2984,17 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
             controls.target.add(flightMovement)
             selectSection(null)
             setIsSeatView(false)
+            setViewPreset('custom')
             setCameraViewLabel(null)
             setCameraLens(null)
             setCameraHorizontalFov(null)
             selectedFocalLength = null
           }
         }
+        unconstrainedPosition.copy(camera.position)
+        constrainCameraPosition(camera.position)
+        unconstrainedPosition.sub(camera.position)
+        controls.target.sub(unconstrainedPosition)
         updateAxisGuide()
         activeRenderer.render(scene, camera)
         frame = window.requestAnimationFrame(animate)
@@ -2415,16 +3008,22 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
         activeRenderer.domElement.removeEventListener('pointerup', onPointerUp)
         activeRenderer.domElement.removeEventListener('pointermove', onPointerMove)
         activeRenderer.domElement.removeEventListener('pointerleave', onPointerLeave)
+        activeRenderer.domElement.removeEventListener('pointercancel', cancelPointerLook)
+        activeRenderer.domElement.removeEventListener('lostpointercapture', cancelPointerLook)
+        window.removeEventListener('blur', cancelPointerLook)
+        cancelPointerLook()
         activeRenderer.domElement.removeEventListener('keydown', onFlightKeyDown)
         window.removeEventListener('keyup', onFlightKeyUp)
         activeRenderer.domElement.removeEventListener('blur', clearFlightKeys)
         window.removeEventListener('blur', clearFlightKeys)
+        controls.removeEventListener('start', onOrbitStart)
         controls.dispose()
         disposeObject(scene)
         activeRenderer.dispose()
         activeRenderer.domElement.remove()
         sceneRef.current = null
         viewPresetRef.current = null
+        stageSceneRef.current = null
       }
     } catch (caughtError) {
       console.error('Could not initialize the 3D venue.', caughtError)
@@ -2438,6 +3037,10 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
   }, [])
 
   useEffect(() => {
+    stageSceneRef.current?.(stageScene)
+  }, [stageScene])
+
+  useEffect(() => {
     const scene = sceneRef.current
     if (!scene) return
 
@@ -2448,6 +3051,10 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
       disposeObject(audience)
     }
   }, [seats])
+
+  useEffect(() => {
+    if (sceneRef.current) applyHouseLightLevel(sceneRef.current, houseLightLevel)
+  }, [houseLightLevel])
 
   const toggleFullscreen = async () => {
     const container = containerRef.current
@@ -2466,6 +3073,60 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
     }
   }
 
+  const controls = (
+    <div className={`venue-controls-dock${isControlsOpen ? ' is-open' : ''}`} ref={controlsDockRef}>
+      <button
+        className="venue-controls-toggle"
+        type="button"
+        ref={controlsToggleRef}
+        aria-label="View controls"
+        aria-expanded={isControlsOpen}
+        aria-controls={controlsId}
+        onClick={() => setIsControlsOpen((current) => !current)}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7h6m4 0h6M4 17h10m4 0h2M10 4v6m4 4v6" />
+        </svg>
+        <span>View controls</span>
+      </button>
+      <div className="venue-3d-controls" id={controlsId} role="group" aria-label="3D view controls">
+        <label>
+          Camera
+          <select aria-label="Camera angle" value={viewPreset} onChange={(event) => {
+            const preset = event.target.value
+            if (preset === 'overview' || preset === 'birds-eye' || preset === 'rear'
+              || preset === 'stage' || preset === 'conductor') viewPresetRef.current?.(preset)
+          }}>
+            <option value="custom" disabled>Custom / seat view</option>
+            <option value="overview">Overview</option>
+            <option value="birds-eye">Bird's eye view</option>
+            <option value="rear">Rear camera</option>
+            <option value="stage">Stage DJI</option>
+            <option value="conductor">Conductor phone</option>
+          </select>
+        </label>
+        <SceneSelector scene={stageScene} onChange={onSceneChange} />
+        <label className="house-light-control">
+          House lights
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={houseLightLevel}
+            aria-valuetext={`${houseLightLevel}%`}
+            onChange={(event) => setHouseLightLevel(event.target.valueAsNumber)}
+          />
+          <output>{houseLightLevel}%</output>
+        </label>
+        <button type="button" onClick={toggleFullscreen} ref={fullscreenButtonRef}>
+          {isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+        </button>
+      </div>
+    </div>
+  )
+  const controlsTarget = fullscreenControlsHost ?? controlsHost
+
   return (
     <div
       className="venue-3d"
@@ -2480,26 +3141,7 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
           {hoveredSection && (
             <div className="venue-section-label" role="status">{hoveredSection}</div>
           )}
-          <div className="venue-3d-controls">
-            <button type="button" onClick={() => viewPresetRef.current?.('overview')}>
-              Overview
-            </button>
-            <button type="button" onClick={() => viewPresetRef.current?.('birds-eye')}>
-              Bird's eye view
-            </button>
-            <button type="button" onClick={() => viewPresetRef.current?.('rear')}>
-              Rear camera
-            </button>
-            <button type="button" onClick={() => viewPresetRef.current?.('lift')}>
-              Lift camera
-            </button>
-            <button type="button" onClick={() => viewPresetRef.current?.('stage')}>
-              Stage DJI
-            </button>
-            <button type="button" onClick={toggleFullscreen}>
-              {isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-            </button>
-          </div>
+          {controlsTarget ? createPortal(controls, controlsTarget) : controls}
           <div className={`venue-3d-help${isHelpOpen ? ' is-open' : ''}`}>
             <button
               type="button"
@@ -2510,7 +3152,7 @@ export default function Venue3D({ seats, audienceTotal, totalCapacity }: Venue3D
               Navigation help
             </button>
             <div className="venue-help-popover" id={helpId}>
-              <p>Drag to orbit · Scroll to zoom · Right-drag to pan</p>
+              <p>Drag to look around · Scroll to zoom · Shift-drag or right-drag to pan</p>
               <p>Click the scene, then WASD to fly · Q/E down/up · Shift faster</p>
               <p>Click a chair for seat view or a camera for its framing.</p>
               <p>Hover stage sections to identify them.</p>
